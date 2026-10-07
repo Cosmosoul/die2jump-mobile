@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#12161a">
+<meta name="format-detection" content="telephone=no">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23485059'/%3E%3Crect x='2.5' y='3' width='11' height='7.5' rx='1.5' fill='%23131a20'/%3E%3Crect x='4' y='5' width='3' height='3' fill='%23e8b641'/%3E%3Ccircle cx='4.6' cy='13' r='1.4' fill='%239ea8b2'/%3E%3Ccircle cx='11.4' cy='13' r='1.4' fill='%239ea8b2'/%3E%3C/svg%3E">
+<title>拼死跳跃 · Die to Jump（手机版）</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;
+  background:linear-gradient(180deg,#2c3239 0%,#1d2228 55%,#12161a 100%);
+  font-family:monospace;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
+  overscroll-behavior:none;touch-action:none}
+canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;display:block}
+#playScreen{position:absolute;inset:0;display:none}
+#playScreen.active{display:block}
+#playCanvasWrap{position:absolute;inset:0}
+/* 掌机屏幕窗口：圆角 + 内阴影。包边与凹陷由 canvas 机身层绘制，
+   这里只负责把画布裁成与窗口一致的圆角形状。 */
+#playCanvasWrap.md{overflow:hidden;background:#0a0e1a;box-shadow:inset 0 0 26px rgba(0,0,0,.6)}
+#ui{z-index:2}
+#accessibility{position:absolute;inset:0;z-index:3;pointer-events:none}
+#accessibility button{position:absolute;pointer-events:auto;opacity:0;cursor:pointer;border:0;margin:0;padding:0}
+#accessibility button:focus-visible{opacity:.16;outline:3px solid #f0b73e;background:#1a1710}
+#legacy{display:none}
+</style>
+</head>
+<body>
+<div id="playScreen"><div id="playCanvasWrap"><canvas id="playCanvas"></canvas></div></div>
+<canvas id="ui" aria-label="拼死跳跃游戏画面"></canvas>
+<div id="accessibility"></div>
+<div id="legacy"><div id="playInfo"></div><div id="playWin"></div><div id="playControls"></div><div id="playFreeLookHint"></div></div>
+<!-- 必须在 game.js 之前声明：game.js 会据此决定是否自行注册 resize 监听
+     （手机版的布局由 mobile-ui.js 接管，避免两套缩放逻辑互相覆盖）。 -->
+<script>window.MOBILE_MODE=true;</script>
+<script src="levels.js"></script>
+<script src="audio.js"></script>
+<script src="fx.js"></script>
+<script src="runtime.js"></script>
+<script src="game.js"></script>
+<script src="mobile-ui.js"></script>
+</body>
+</html>
