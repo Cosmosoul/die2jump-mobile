@@ -3426,6 +3426,18 @@ PlayGhost.prototype.update=function(){
   this.fadeAlpha=Math.max(0,Math.min(1,a));
 };
 PlayGhost.prototype.reset=function(){this.progress=0;};
+/* 把场上所有幽灵拉回各自轨迹的起点（PC 的 L 键 / 手机版「起点」键共用）。
+   玩家本身不动、不扣血；返回被重置的幽灵数量。 */
+function rewindGhosts(){
+  var list=Play.ghosts;
+  if(!list||!list.length)return 0;
+  var n=0;
+  for(var i=0;i<list.length;i++){
+    var g=list[i];
+    if(g&&typeof g.reset==='function'){g.reset();n++;}
+  }
+  return n;
+}
 
 /* ============ 相机 ============ */
 function makeCamera(lv){
@@ -3471,7 +3483,7 @@ function updateCamera(cam,player,worldBounds,camOffset){
     if(offsetY<airTop)targetY=pCY-airTop;
     else if(offsetY>airBottom)targetY=pCY-airBottom;
   }
-  if(camOffset){targetX+=camOffset.x;targetY+=camOffset.y;}
+  /* 摄像机严格跟随玩家：不再叠加任何手动偏移（拖动看场景已停用）。 */
   cam.x+=(targetX-cam.x)*cam.lerpX;
   cam.y+=(targetY-cam.y)*cam.lerpY;
   /* === 摄像机边界限制 ===
@@ -4493,12 +4505,6 @@ function updatePlay(dt){
       return;
     }
   }
-  if(Play.freeLookTimer>0)Play.freeLookTimer-=dt;
-  else{
-    Play.camOffset.x*=0.92;Play.camOffset.y*=0.92;
-    if(Math.abs(Play.camOffset.x)<0.5)Play.camOffset.x=0;
-    if(Math.abs(Play.camOffset.y)<0.5)Play.camOffset.y=0;
-  }
   if(Play.screenShake>0.5)Play.screenShake*=0.88;
   else Play.screenShake=0;
   if(!Play.cam)Play.cam=makeCamera(LevelContext.levels[LevelContext.currentIdx]);
@@ -4662,36 +4668,8 @@ function isDisappearVisible(d){
 }
 
 function bindPlayDrag(){
-  if(playDragBound)return;
-  playDragBound=true;
-  var c=D.playCanvas;
-  var onStart=function(clientX,clientY,target){
-    if(target&&target.closest&&target.closest('.pc-zone'))return false;
-    Play.dragStart={x:clientX,y:clientY,ox:Play.camOffset.x,oy:Play.camOffset.y};
-    Play.freeLookTimer=3;
-    D.playFreeLookHint.classList.add('show');
-    return true;
-  };
-  var onMove=function(clientX,clientY){
-    if(!Play.dragStart)return;
-    var dx=clientX-Play.dragStart.x;
-    var dy=clientY-Play.dragStart.y;
-    if(Math.abs(dx)<3&&Math.abs(dy)<3)return;
-    Play.camOffset.x=Play.dragStart.ox-dx/Play.cam.zoom;
-    Play.camOffset.y=Play.dragStart.oy-dy/Play.cam.zoom;
-    Play.freeLookTimer=3;
-  };
-  var onEnd=function(){
-    Play.dragStart=null;
-    setTimeout(function(){if(Play.freeLookTimer<=0)D.playFreeLookHint.classList.remove('show');},3100);
-  };
-  c.addEventListener('touchstart',function(e){if(e.touches.length===1)onStart(e.touches[0].clientX,e.touches[0].clientY,e.target);},{passive:false});
-  c.addEventListener('touchmove',function(e){if(e.touches.length===1)onMove(e.touches[0].clientX,e.touches[0].clientY);},{passive:false});
-  c.addEventListener('touchend',onEnd);
-  c.addEventListener('touchcancel',onEnd);
-  c.addEventListener('mousedown',function(e){if(e.button===0)onStart(e.clientX,e.clientY,e.target);});
-  c.addEventListener('mousemove',function(e){if(Play.dragStart)onMove(e.clientX,e.clientY);});
-  window.addEventListener('mouseup',onEnd);
+  /* 已停用：摄像机只跟随玩家，不允许拖动画面自由看场景。
+     保留空函数，避免历史调用点报错。 */
 }
 
 /* ============ 试玩渲染 ============ */

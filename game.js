@@ -18,7 +18,7 @@ const C={
   teal:'#2f9e8f', tealHi:'#66c9b8',
   shadow:'rgba(38,51,58,0.26)'
 };
-let scale=1,W=960,H=600,last=performance.now(),acc=0,clock=0,buttons=[],pointer={x:-1,y:-1,down:false},dragSlider=null,hoverId='',focusId='',screenKey='',dragView=null;
+let scale=1,W=960,H=600,last=performance.now(),acc=0,clock=0,buttons=[],pointer={x:-1,y:-1,down:false},dragSlider=null,hoverId='',focusId='',screenKey='';
 /* 响应式布局单位（在 resize() 里重算）
    VS：纵向呼吸量。16:9 视口恒为 1（观感与既有版本完全一致）；
        高屏 / 4:3 等纵向更宽的视口放大，把固定面板纵向撑开、居中内容不再缩成一小块。
@@ -102,7 +102,45 @@ function button(id,label,x,y,w,h,fn,opt={}){const b={id,label,x,y,w,h,fn,disable
   if(opt.icon)icon(opt.icon,x+26,y+h/2+dy,1.35);
   text(label,x+w/2+(opt.icon?10:0),y+h/2+dy,opt.disabled?C.inkFaint:C.ink,1.16);}
 function syncAccess(){const key=buttons.map(b=>b.id+'|'+b.x+'|'+b.y+'|'+b.w+'|'+b.h+'|'+b.disabled).join(';');if(key===screenKey)return;screenKey=key;access.replaceChildren();for(const b of buttons){const el=document.createElement('button');el.id=b.id;el.setAttribute('aria-label',b.label);el.title=b.label;el.disabled=b.disabled;el.style.cssText=`left:${b.x*scale}px;top:${b.y*scale}px;width:${b.w*scale}px;height:${b.h*scale}px`;el.onfocus=()=>focusId=b.id;el.onblur=()=>focusId='';el.onclick=()=>activate(b.id);access.appendChild(el);}}
-function activate(id){const b=buttons.find(v=>v.id===id);if(!b||b.disabled||fxBusy)return;AudioSystem.sfx('uiClick');pointer.down=false;b.fn();}
+/* ---- 输入闸门：防止「界面切换瞬间的连点」穿透到下一层界面 ----
+   触屏上这一点尤其明显：在旧界面按下、界面已换掉、手指抬起时落在新界面的
+   按钮上，于是新人物的第一个动作莫名其妙地被执行了（例：在菜单点「设置」，
+   连点第二下正好命中设置页的「清除存档」）。
+
+   策略（严格按需求划分）：
+   · 【局外各界面】菜单 / 选关 / 设置 / 说明 / 确认弹窗 —— 切换后短暂屏蔽点击；
+   · 【局内外衔接处】进入关卡、暂停、胜负结算 —— 同样屏蔽一小段，避免进场
+     瞬间就误触局内按键；
+   · 【局内 playing】不做任何处理 —— 只要状态没变，闸门自然过期，
+     移动 / 跳跃 / 插旗等操作保持原始灵敏度。
+
+   闸门按 `clock`（主循环时钟）计时，因此在任何机型、任何帧率下时长一致。
+
+   闸门**只对触摸类输入（touch / pen）生效**：鼠标落点精确，不存在
+   “手指抬起时界面已换掉”的穿透问题，因此 PC 端不做任何延时屏蔽，
+   保持即点即应的手感（也避免把键盘/鼠标玩家误伤成“点了没反应”）。 */
+let gateUntil=0;
+let gateArmed=false;     /* 本次输入是否为触摸类；由 pointerdown 的 pointerType 决定 */
+const GATE_UI=0.30;      /* 局外界面之间切换后的基础屏蔽时长（秒） */
+const GATE_ENTER=0.36;   /* 进入关卡后的基础屏蔽时长（秒） */
+const GATE_BURST=0.30;   /* 连点续闸：每挡下一次，窗口从该次重新起算（秒） */
+function gateNow(sec){gateUntil=Math.max(gateUntil,clock+sec);}
+/* 标记“本次输入属于触摸/手写笔”。鼠标落点精确、不会穿透，所以不设闸门。
+   局内按键会 stopPropagation，window 收不到它们的 pointerdown，
+   因此在那边也直接调用本函数来标记。 */
+function armGate(pointerType){gateArmed=(pointerType==='touch'||pointerType==='pen');}
+/* 是否处于屏蔽窗口。
+   固定时长在“连点末次刚好压线”时会随机漏一次点击（实测只差 30ms 就会穿透），
+   所以这里改成**查询并续闸**：只要还有点击落在窗口内，说明用户仍在同一串
+   连点里，就把窗口从“本次”重新起算，保证整串连点都被挡下。
+   关键性质——窗口永远从“本次点击”起算，因此它离当下最多 GATE_BURST 远，
+   不会随连点次数累积。玩家一停手，最多 GATE_BURST 后就恢复响应，不存在锁死。 */
+function gated(){
+  if(!gateArmed||clock>=gateUntil)return false;
+  gateUntil=Math.max(gateUntil,clock+GATE_BURST);
+  return true;
+}
+function activate(id){const b=buttons.find(v=>v.id===id);if(!b||b.disabled||fxBusy||gated())return;AudioSystem.sfx('uiClick');pointer.down=false;b.fn();}
 /* ---- 场景切换：状态落地 + shader 遮罩转场 ---- */
 let fxBusy=false;
 let Entering=false;   /* 正在进入关卡（防重入） */
@@ -116,7 +154,10 @@ function fxEdge(from,to){
   return false;                              /* 其余页面切换不转场 */
 }
 function fxEnabled(){return !!(window.SceneFX&&SceneFX.enabled());}
-function applyState(state){Game.state=state;Game.transition=fxEnabled()?0:1;screenKey='';focusId='';Play.keys={};dragView=null;const gaming=['playing','pause','win','fail'].includes(state);D.playScreen.classList.toggle('active',gaming);Play.active=gaming;
+function applyState(state){Game.state=state;Game.transition=fxEnabled()?0:1;screenKey='';focusId='';Play.keys={};const gaming=['playing','pause','win','fail'].includes(state);D.playScreen.classList.toggle('active',gaming);Play.active=gaming;
+  /* 落地新界面后开启输入闸门：局外页面切换用 UI 时长，进出关卡用稍长的时长。
+     局内（playing 且来源也是局内）不加闸门，保持操作灵敏。 */
+  gateNow(state==='playing'?GATE_ENTER:GATE_UI);
   /* 局内（playing/win/fail）保持关卡音乐连续（不因结算页而硬切到菜单主题，避免突兀）；
      仅 pause→pause 主题、quit→静音、其余页面→菜单主题。 */
   AudioSystem.setScene((state==='playing'||state==='win'||state==='fail')?'level':state==='pause'?'pause':state==='quit'?'silent':'menu',Game.levels[Game.selected]?.lv);}
@@ -287,7 +328,7 @@ function help(){header('游戏说明','');
   button('helpKeys','键位说明',x+22*k,y+20,168*k,36,()=>{Game.tab=0;},{primary:Game.tab===0});
   button('helpRules','玩法说明',x+202*k,y+20,168*k,36,()=>{Game.tab=1;},{primary:Game.tab===1});
   rect(x+22*k,y+68,pw-44*k,2,'#cbbf9e');
-  if(!Game.tab){const rows=[['A / D','左右移动'],['W / ↑','跳跃 · 长按更高 · 空中二段跳 / 蹬墙跳'],['空格','跳跃'],['F','插旗 / 拔旗 · 设置重生点'],['K','主动爆破 · 推箱 / 碎块 / 引燃'],['J','按住减缓幽灵回放 · 消耗慢放能量'],['ESC','暂停 / 继续']];
+  if(!Game.tab){const rows=[['A / D','左右移动'],['W / ↑','跳跃 · 长按更高 · 空中二段跳 / 蹬墙跳'],['空格','跳跃'],['F','插旗 / 拔旗 · 设置重生点'],['K','主动爆破 · 推箱 / 碎块 / 引燃'],['J','按住减缓幽灵回放 · 消耗慢放能量'],['L','幽灵回到轨迹起点'],['ESC','暂停 / 继续']];
     /* 行距随可用高度压缩，避免高/矮窗口下行溢出面板 */
     const step=Math.min(46,(ph-104)/rows.length);
     rows.forEach(([key,s],i)=>{const dy=92+i*step;keyboard(key,x+40*k,y+dy,104*k,1.05*Math.max(.8,k));textLeft(s,x+196*k,y+dy+15,C.ink,1.14*Math.max(.82,k));});}
@@ -376,18 +417,24 @@ function frame(now){const dt=Math.min(.12,(now-last)/1000);last=now;clock+=dt;Ga
   if(Game.state==='playing'){acc+=dt;let guard=0;while(acc>=1/60&&guard++<8){simulation();acc-=1/60;}renderPlay();}
   else if(['pause','win','fail'].includes(Game.state))renderPlay();else acc=0;renderUI();requestAnimationFrame(frame);}
 function point(e){pointer.x=e.clientX/scale;pointer.y=e.clientY/scale;}
-window.addEventListener('pointermove',e=>{point(e);const b=buttons.find(v=>!v.disabled&&inRect(pointer,v));if((b?b.id:'')!==hoverId){hoverId=b?b.id:'';if(hoverId)AudioSystem.sfx('uiHover');}if(dragView&&Game.state==='playing'){Play.camOffset.x=dragView.ox-(e.clientX-dragView.x)/Play.cam.zoom;Play.camOffset.y=dragView.oy-(e.clientY-dragView.y)/Play.cam.zoom;Play.freeLookTimer=3;}});
-window.addEventListener('pointerdown',e=>{point(e);pointer.down=true;if(Game.state==='boot'){startGame();return;}const b=buttons.find(v=>inRect(pointer,v));if(b&&b.slider){dragSlider=b.id;e.preventDefault();}else if(!b&&Game.state==='playing'&&e.button===0)dragView={x:e.clientX,y:e.clientY,ox:Play.camOffset.x,oy:Play.camOffset.y};});
-window.addEventListener('pointerup',()=>{pointer.down=false;dragSlider=null;dragView=null;});
+window.addEventListener('pointermove',e=>{point(e);const b=buttons.find(v=>!v.disabled&&inRect(pointer,v));if((b?b.id:'')!==hoverId){hoverId=b?b.id:'';if(hoverId)AudioSystem.sfx('uiHover');}});
+window.addEventListener('pointerdown',e=>{point(e);
+  /* 记录本次输入的指针类型：只有触摸/手写笔才会遭受“抬起时界面已换掉”的穿透，
+     所以闸门仅对它们生效（鼠标/键盘玩家的点击立即响应，不受影响）。 */
+  armGate(e.pointerType);
+  pointer.down=true;if(Game.state==='boot'){startGame();return;}const b=buttons.find(v=>inRect(pointer,v));if(b&&b.slider){dragSlider=b.id;e.preventDefault();}});
+window.addEventListener('pointerup',()=>{pointer.down=false;dragSlider=null;});
 window.addEventListener('keydown',e=>{const code=e.code;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Escape'].includes(code))e.preventDefault();
   if(Game.state==='boot'){if(!e.repeat&&!['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'].includes(code))startGame();return;}
   if(code==='Escape'&&!e.repeat){if(['playing','pause'].includes(Game.state))pause();else if(['settings','help','levels'].includes(Game.state))change('menu');else if(Game.state==='resetConfirm')change('settings');else if(Game.state==='exitConfirm')change('menu');return;}
-  if(Game.state!=='playing'||e.repeat)return;Play.keys[code==='Space'?'ArrowUp':code]=true;if(code==='KeyK')doSuicidePlay();if(code==='KeyF')doFlagAction();if(code==='KeyJ')AudioSystem.sfx('slow');if(code==='KeyL'){Play.ghosts.forEach(v=>v.reset());AudioSystem.sfx('ghost');}if(code==='KeyR')begin(Game.selected);});
+  if(Game.state!=='playing'||e.repeat)return;Play.keys[code==='Space'?'ArrowUp':code]=true;if(code==='KeyK')doSuicidePlay();if(code==='KeyF')doFlagAction();if(code==='KeyJ')AudioSystem.sfx('slow');if(code==='KeyL'){if(rewindGhosts())AudioSystem.sfx('ghost');}if(code==='KeyR')begin(Game.selected);});
 window.addEventListener('keyup',e=>{Play.keys[e.code==='Space'?'ArrowUp':e.code]=false;});
 window.addEventListener('blur',()=>{Play.keys={};pointer.down=false;dragSlider=null;if(Game.state==='playing')pause();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&Game.state==='playing')pause();});
-/* resize 监听由 mobile-ui.js 接管（它会调用同名 resize 之外的专用布局流程），
-   这里不注册，避免两套布局互相覆盖。PC 版仍走下面的 resize()。 */
+/* resize 监听由 mobile-ui.js 接管（它有自己的整套竖屏布局流程），
+   手机版在 index.html 里先置 window.MOBILE_MODE=true，这里就不再注册，
+   避免两套缩放逻辑互相覆盖。电脑版没有该标志，正常走下面的 resize()。
+   —— 用同一个开关而非两套文件，可避免电脑版/手机版源码漂移。 */
 if(!window.MOBILE_MODE)window.addEventListener('resize',resize);
 /* ------------------------------------------------------------ 关卡载入 */
 function normalize(data){const source=Array.isArray(data)?data:(data&&Array.isArray(data.levels))?data.levels:(data&&data.level)?[data.level]:(data&&data.elements)?[data]:[];const out=[];
@@ -412,7 +459,7 @@ function preview(lv){const c=document.createElement('canvas');c.width=340;c.heig
   for(const e of lv.elements){const a=getAdjacency(e,lv.elements);switch(e.type){case'platform':drawPlatformTo(q,e,a);break;case'ice':drawIceTo(q,e,a);break;case'movable':drawMovableTo(q,e,a);break;case'breakable':drawBreakableTo(q,e,a);break;case'flammable':drawFlammableTo(q,e,a);break;case'water':drawWaterTo(q,e,false);break;case'goal':drawGoalPortalShader(q,e,0);break;case'trophy':drawTrophyTo(q,e);break;case'switchDoor':drawSwitchDoorTo(q,e,false);break;case'switch':drawSwitchTo(q,e,false);break;case'gravityFlip':drawGravityZoneShader(q,e,0);break;case'door':q.fillStyle='#c19748';q.fillRect(e.x,e.y,e.w,e.h);break;case'spike':case'fallingSpike':q.fillStyle='#cf4e65';q.beginPath();q.moveTo(e.x,e.y+e.h);q.lineTo(e.x+e.w/2,e.y);q.lineTo(e.x+e.w,e.y+e.h);q.fill();break;case'spawn':q.fillStyle='#6affa9';q.fillRect(e.x,e.y-8,8,8);break;case'flagPickup':q.fillStyle='#edce61';q.fillRect(e.x,e.y,6,4);break;case'heart':q.fillStyle='#e46376';q.fillRect(e.x,e.y,7,6);break;case'laserRight':case'laserLeft':case'laserUp':case'laserDown':q.fillStyle='#ff4d6a';q.fillRect(e.x,e.y,7,7);break;case'disappear':q.fillStyle='rgba(190,170,255,.75)';q.fillRect(e.x,e.y,Math.max(6,e.w),Math.max(4,e.h));break;}}
   q.restore();return c;}
 function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/3)-1));Game.ready=true;screenKey='';}
-['playScreen','playCanvas','playCanvasWrap','playInfo','playWin','playControls','playFreeLookHint'].forEach(k=>D[k]=document.getElementById(k));
+['playScreen','playCanvas','playCanvasWrap','playInfo','playWin','playControls'].forEach(k=>D[k]=document.getElementById(k));
 resize();loadLevels();requestAnimationFrame(frame);
 window.GameAPI={begin,pause,normalize,loadLevels,formatTime,unlocked,resetProgress,simulation,change,
   transitioning:()=>fxBusy||(window.SceneFX?SceneFX.isPlaying():false),

@@ -531,22 +531,23 @@
     for (const k in MU.held) delete MU.held[k];
     for (const k in MU._tapT) { clearTimeout(MU._tapT[k]); delete MU._tapT[k]; }
   };
-  /* 「起点」：把角色送回当前出生点（有旗子则回旗子），不消耗生命、
-     不产生幽灵。与「自杀」的区别是「自杀」会扣血并留下回放幽灵。 */
-  MU.goToSpawn = function () {
+  /* 「起点」：让场上的幽灵回到各自轨迹的起点（与 PC 端的 L 键同源）。
+     注意——这**不是**让玩家回重生点：玩家原地不动、不扣血，
+     只是把幽灵回放拉回轨迹开头，方便反复观察 / 借幽灵借力。
+     （若玩家正站在幽灵上，会随幽灵一起被带回去，这属于正常玩法。） */
+  MU.ghostRewind = function () {
     if (Game.state !== 'playing') return;
-    if (typeof respawnPlay === 'function') {
-      respawnPlay(Play.currentFlag ? 'flag' : 'default');
-      Play.trajectory = [];
-      AudioSystem.sfx('uiClick');
-      notify(Play.currentFlag ? '回到旗子' : '回到起点');
-    }
+    if (typeof rewindGhosts !== 'function') return;
+    const n = rewindGhosts();
+    if (!n) { notify('当前没有幽灵'); return; }
+    AudioSystem.sfx('ghost');
+    notify('幽灵已回到轨迹起点');
   };
   MU.ctrlFn = function (c) {
     if (c.hold) return function () { MU.tapHold(c.hold); };
     if (c.id === 'mobFlag') return function () { if (Game.state === 'playing') doFlagAction(); };
     if (c.id === 'mobDie') return function () { if (Game.state === 'playing') doSuicidePlay(); };
-    if (c.id === 'mobRestart') return function () { MU.goToSpawn(); };
+    if (c.id === 'mobRestart') return function () { MU.ghostRewind(); };
     if (c.id === 'mobPause') return function () { if (Game.state === 'playing' || Game.state === 'pause') pause(); };
     return function () { };
   };
@@ -576,6 +577,9 @@
      否则松手后还会多触发一次 210ms 的“轻点”，出现二段跳之类的误操作。 */
   const _origActivate = activate;
   activate = function (id) {
+    /* 输入闸门（界面切换后的短暂屏蔽）：直接返回，且**不要**点亮键面，
+       否则会闪出一个「按了但没反应」的假反馈，反而让人以为按键坏了。 */
+    if (typeof gated === 'function' && gated()) return;
     let b = null;
     for (let i = 0; i < buttons.length; i++) if (buttons[i].id === id) { b = buttons[i]; break; }
     if (COARSE && b && b._mob) {
@@ -603,6 +607,12 @@
       if (!code) continue;
       const down = function (ev) {
         if (Game.state !== 'playing') return;
+        /* 这类按键会 stopPropagation，window 上的 pointerdown 不会触发，
+           所以在这里自行标记“本次是否为触摸类输入”，闸门才会对它生效。 */
+        if (typeof armGate === 'function') armGate(ev.pointerType);
+        /* 局内外衔接处：刚进关卡的极短窗口内屏蔽，避免「进入关卡的那一次连点」
+           顺手把方向键/跳跃也按下去了（局内稳态不受影响，闸门会自然过期）。 */
+        if (typeof gated === 'function' && gated()) return;
         /* 阻止冒泡到 window：否则主输入层会把这次按压当成“拖动镜头”，
            导致按住方向键的同时镜头跟着乱走。 */
         ev.stopPropagation();
@@ -885,7 +895,7 @@
         ['flag', '插旗 / 拔旗 · 设置重生点'],
         ['slow', '按住减缓幽灵回放 · 消耗慢放能量'],
         ['skull', '主动爆炸 · 推箱 / 碎块 / 引燃'],
-        ['restart', '回到当前重生点（旗子或起点）'],
+        ['restart', '幽灵回到轨迹起点（玩家原地不动）'],
         ['pause', '暂停 / 继续']];
       const fams = { left: 'neutral', up: 'gold', flag: 'green', slow: 'teal', skull: 'red', restart: 'violet', pause: 'neutral' };
       const avail = ph - headH - 10;
