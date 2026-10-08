@@ -3370,13 +3370,11 @@ PlayGhost.prototype.update=function(){
     this.fadeAlpha=1;
     return;
   }
-  var baseSpeed=0.8;
-  if(Play.keys['KeyJ']&&Play.energy>0){
-    baseSpeed=0.2;
-    Play.energy=Math.max(0,Play.energy-1/240);
-  }else{
-    Play.energy=Math.min(1,Play.energy+1/90);
-  }
+  /* 减速速度由「本帧慢放状态机」统一决定（见 updatePlay 里的 slowState）。
+     能量消耗 / 回涨**不写在这里**：update() 每只已释放幽灵各调用一次，
+     写在这里会让消耗速度随幽灵数量翻倍；而且旧逻辑的 else 分支在按住不放、
+     能量已为 0 时仍会回涨 → 0 附近反复震荡 → 观感就是「条空了还在一直减速」。 */
+  var baseSpeed=Play.slowActive?0.2:0.8;
   // 离屏判定（沿用旧机制，只用于决定是否加速）
   var offScreen=false;
   if(Play.cam){
@@ -3517,6 +3515,11 @@ var Play={
   lives:3,maxLives:3,
   camOffset:{x:0,y:0},freeLookTimer:0,dragStart:null,
   energy:1,screenShake:0,_flagGhostsCleared:false,
+  /* 慢放能量状态机的状态位（见 updatePlay）：
+     slowActive：本帧是否正在减速幽灵；slowLocked：触底后等待回满的锁定；
+     slowRefill：正在进行的「触底雪崩回涨」的剩余秒数（>0 表示强制回涨中）。
+     slowWarn：黄色→绿色渐变的进度（1=全黄，0=全绿）。 */
+  slowActive:false,slowLocked:false,slowRefill:0,slowWarn:0,
   _dyingBySuicide:false,_flagKeyHeld:false,
   deathAnim:null,
   showGrid:false
@@ -3533,7 +3536,7 @@ function startPlay(){
   Play.currentRespawnOrigin='default';Play.currentFlag=null;Play.placedFlags=[];
   Play.flagsCollected=lv.initialFlags||0;
   Play.lives=lv.initialLives||3;Play.maxLives=Play.lives;
-  Play.energy=1;
+  Play.energy=1;Play.slowActive=false;Play.slowLocked=false;Play.slowRefill=0;Play.slowWarn=0;
   Play.camOffset={x:0,y:0};Play.freeLookTimer=0;Play.dragStart=null;
   Play.screenShake=0;Play._dyingBySuicide=false;Play._flagKeyHeld=false;
   Play.deathAnim=null;
@@ -4313,6 +4316,38 @@ function updatePlay(dt){
         continue;
       }
     }
+  }
+  // ---- 慢放能量状态机：每帧只在**这里**更新一次 ----
+  //   规则（对应手感需求）：
+  //    · 按住且未触底 → 消耗能量（幽灵减速）；按住期间**绝不回涨**。
+  //    · 触底（能量=0）→ 进入「一次性慢慢涨满」的锁定态：
+  //        期间即使按住也不再消耗、**回涨也不会被打断**（松开或按住都一样涨）；
+  //        必须**回满一次**才解除锁定，其间幽灵恢复基准速（不再减速）。
+  //        （修复旧版：能量在 0 附近反复回涨/消耗 → “条空了还在减速”；
+  //          以及点按会打断回涨的问题。）
+  //    · 未触底的普通回涨：只有**松开按键**才回涨，且可被再次按下**随时打断**。
+  //    · 触底回涨期间进度条为黄色；回满后黄色**缓慢渐变**回原本的绿色。
+  {
+    var REFILL_FULL = 1.6;   /* 触底后“一次性慢慢涨满”所需秒数 */
+    var holdJ = !!Play.keys['KeyJ'];
+    if (Play.slowLocked) {
+      /* —— 触底后的强制回涨：一次性、不可打断、按住也不消耗 —— */
+      Play.slowActive = false;
+      Play.energy = Math.min(1, Play.energy + dt * (1 / REFILL_FULL));
+      Play.slowRefill = Math.max(0, Play.slowRefill - dt);
+      if (Play.energy >= 1) { Play.slowLocked = false; Play.slowRefill = 0; }
+    } else if (holdJ && Play.energy > 0) {
+      /* —— 正常减速：按住且未触底 → 消耗 —— */
+      Play.slowActive = true;
+      Play.energy = Math.max(0, Play.energy - dt * (1 / 4));      /* ≈4s 耗尽 */
+      if (Play.energy <= 0) { Play.slowLocked = true; Play.slowRefill = REFILL_FULL; Play.slowWarn = 1; Play.slowActive = false; }
+    } else {
+      /* —— 空闲 / 未触底普通回涨（仅松开时；可被打断） —— */
+      Play.slowActive = false;
+      if (!holdJ) Play.energy = Math.min(1, Play.energy + dt * (1 / 1.5));  /* ≈1.5s 回满 */
+    }
+    /* 触底回满后：黄色缓慢渐变为绿色（约 1.2s） */
+    if (!Play.slowLocked) Play.slowWarn = Math.max(0, Play.slowWarn - dt * 0.85);
   }
   // 幽灵更新（仅已释放的）
   for(var gi=0;gi<Play.ghosts.length;gi++){

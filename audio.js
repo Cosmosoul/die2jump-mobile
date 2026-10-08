@@ -97,6 +97,7 @@
 
   var warmReady = true;        // 预热是否已完成（无预热任务时为 true）
   var warmPending = false;     // 是否有预热任务在进行
+  var prewarmToken = 0;        // 每次 prewarm 自增，用于作废旧的后台预热任务
 
   var noiseBuffer = null;
 
@@ -1496,6 +1497,55 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 后台预热（共享实现）                                                 */
+  /* ------------------------------------------------------------------ */
+  /* 按顺序把 list 里的音乐逐一合成进缓存。要点：
+     · 每条轨分片合成（每帧只算几 ms），绝不阻塞主线程。
+     · 一旦出现「前台」任务（玩家正在等的那条轨 / 离线渲染），立即停手让位，
+       否则预热会把进场音乐拖慢数秒。
+     · 用 prewarmToken 作废过期任务：新的预热一启动，旧的立刻收尾退出，
+       避免多个预热循环同时抢主线程。 */
+  function _warmList(list) {
+    ensureReady();
+    if (!built) return Promise.resolve(0);
+    if (MUSIC_CACHE_MAX < list.length + 2) MUSIC_CACHE_MAX = list.length + 2;
+
+    warmReady = false; warmPending = true;
+    var warmTok = ++prewarmToken;
+    return new Promise(function (resolve) {
+      var idx = 0, made = 0;
+      var pending = 0;                 /* 同时只允许一个后台任务在跑 */
+      function idle(fn) {
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(fn, { timeout: 250 });
+        else setTimeout(fn, 0);
+      }
+      function foregroundBusy() { return !!(synthJob || pendingEnsure) || renderPending > 0; }
+      function next() {
+        if (warmTok !== prewarmToken) { resolve(made); return; }
+        if (idx >= list.length) { warmReady = true; warmPending = false; resolve(made); return; }
+        if (foregroundBusy()) { idle(next); return; }
+        var item = list[idx++];
+        var chart = compose(item.kind, item.level);
+        var key = trackKey(item.kind, chart);
+        if (musicCache[key]) { idle(next); return; }
+        var job = createSynthJob(chart, item.kind);
+        (function advance(deadline) {
+          if (warmTok !== prewarmToken) { resolve(made); return; }
+          if (foregroundBusy()) { idle(advance); return; }
+          var budget = (deadline && deadline.timeRemaining) ? Math.min(10, deadline.timeRemaining() + 2) : 6;
+          var done = false;
+          try { done = job.step(budget); } catch (e) { done = true; }
+          if (!done) { idle(advance); return; }
+          var buf = job.finish();
+          if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); made++; }
+          idle(next);
+        })();
+      }
+      idle(next);
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 公开 API                                                            */
   /* ------------------------------------------------------------------ */
   var AudioSystem = {
@@ -1621,42 +1671,27 @@
        返回 Promise，resolve 时预热完成（或在途任务被新任务替换时提前结束）。 */
     prewarm: function (levels) {
       var list = [];
+      /* 「菜单 / 暂停」必须排在最前：它们是玩家最先听到的两段音乐。
+         若把 20 个关卡排在前面，菜单 BGM 要等 ~30s 才轮得到合成
+         （每条轨 ~1.3~1.7s CPU），这正是「开始游戏后音乐等好一阵才响」的根因。 */
+      list.push({ kind: 'menu', level: null });
+      list.push({ kind: 'pause', level: null });
       if (levels && levels.length) {
         for (var i = 0; i < levels.length; i++) list.push({ kind: 'level', level: levels[i] });
       }
-      list.push({ kind: 'menu', level: null });
-      list.push({ kind: 'pause', level: null });
-      ensureReady();
-      if (!built) return Promise.resolve(0);
       /* 预热时把缓存上限抬高，保证全部关卡常驻 */
       if (MUSIC_CACHE_MAX < list.length + 2) MUSIC_CACHE_MAX = list.length + 2;
+      return _warmList(list);
+    },
 
-      warmReady = false; warmPending = true;
-      return new Promise(function (resolve) {
-        var idx = 0, made = 0;
-        function idle(fn) {
-          if (typeof requestIdleCallback === 'function') requestIdleCallback(fn, { timeout: 250 });
-          else setTimeout(fn, 0);
-        }
-        function next() {
-          if (idx >= list.length) { warmReady = true; warmPending = false; resolve(made); return; }
-          var item = list[idx++];
-          var chart = compose(item.kind, item.level);
-          var key = trackKey(item.kind, chart);
-          if (musicCache[key]) { idle(next); return; }
-          var job = createSynthJob(chart, item.kind);
-          (function advance(deadline) {
-            var budget = (deadline && deadline.timeRemaining) ? Math.min(10, deadline.timeRemaining() + 2) : 6;
-            var done = false;
-            try { done = job.step(budget); } catch (e) { done = true; }
-            if (!done) { idle(advance); return; }
-            var buf = job.finish();
-            if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); made++; }
-            idle(next);
-          })();
-        }
-        idle(next);
-      });
+    /* 启动预热：进入主菜单前（甚至用户手势之前）就把「菜单/暂停」两轨算出来。
+       合成纯粹是 CPU 数学运算，不依赖已运行的 AudioContext，所以在 boot 阶段
+       就能开始；等玩家按下按键时，这两条已进缓存 → 音乐瞬间响起、不再等待。
+       与后续 prewarm 用同一个共享 token，避免互相抢主线程 / 重复劳动。 */
+    bootWarm: function () {
+      ensureReady();                       /* 创建（可能仍在 suspended 的）ctx + 音频图 */
+      if (!built) return Promise.resolve(0);
+      return _warmList([{ kind: 'menu', level: null }, { kind: 'pause', level: null }]);
     },
 
     /* 预热进度（0..1），供加载界面显示 */
