@@ -901,6 +901,38 @@ var _SHADER_FNS = {
 var _glShapeCache = new WeakMap();
 var _presetRenderCache = new WeakMap();
 
+/* === 启动性能：预视图的「临时渲染通道」 ===
+   问题：选关缩略图 preview() 只有 340x150，却会对**每个**背景形状按真实尺寸
+   （单个最大可达 3150x1432）各分配一块离屏画布；而且这些画布被 _presetRenderCache
+   以 WeakMap 挂在 shape 对象上，只要关卡数据还活着就永不释放。
+   20 关共约 8299 个形状 → 实测阻塞主线程 87 秒 + 巨量内存（4K 下直接崩渲染进程）。
+
+   解法：preview 期间置 _bgEphemeral，drawBgShape 改走这条通道 ——
+   共享**一块**小画布、尺寸按目标上限限幅、且**完全不写**持久缓存。
+   渲染时仍调用同一套 _presetFn，因此观感与正常路径一致，只是分辨率够用即可。
+
+   注意：仅缩小画布尺寸**不足以**省时间。真正的杠杆是**按输出足迹派网格**。
+   实测（_pxprobe.cjs / _zprobe.cjs）：level1 的 438 个预设形状若按世界尺寸
+   派网格，共 586 万格；按输出足迹（w*z，z≈0.17~0.34）派，只需 69 万格。
+   全 20 关：172,291,401 格 → 9,474,148 格（5.5%，约 18 倍）。
+   但多个 _ps* 函数带 Math.max(60/40,…) 网格下限，故另加每形状 cellBudget 闸。
+   默认 null → 游戏内路径逐字不变（零回归）。 */
+var _bgEphemeral = null;      /* {canvas, ctx, maxPx, cellBudget, scale, ss, pxPerCell} */
+
+function _bgEphBegin(maxPx, cellBudget, scale, ss, pxPerCell) {
+  _bgEphemeral = _bgEphemeral || { canvas: document.createElement('canvas'), ctx: null };
+  _bgEphemeral.maxPx = maxPx || 512;
+  _bgEphemeral.cellBudget = cellBudget || 512;
+  _bgEphemeral.scale = (scale > 0 && isFinite(scale)) ? scale : 1;
+  /* ss：相对**输出像素**的过采样倍数（1=刚好输出分辨率，2=两倍，视觉更顺）。
+     pxPerCell：每个网格格最多覆盖多少画布像素（越小越精细、越慢）。 */
+  _bgEphemeral.ss = (ss > 0 && isFinite(ss)) ? ss : 1;
+  _bgEphemeral.pxPerCell = (pxPerCell > 0 && isFinite(pxPerCell)) ? pxPerCell : 6;
+  if (!_bgEphemeral.ctx) _bgEphemeral.ctx = _bgEphemeral.canvas.getContext('2d');
+  return _bgEphemeral;
+}
+function _bgEphEnd() { _bgEphemeral = null; }
+
 function _hexToRgb01(hex) {
   if (!hex || hex[0] !== '#') return [1, 1, 1];
   if (hex.length === 7) return [
@@ -1025,6 +1057,36 @@ function drawBgShape(g, sh, x, y, w, h, alpha, time, editorMode, inCurrent, neig
        把像素网格一次性渲染到离屏画布，之后每帧只做一次 drawImage。
        speed=0 的形状永久缓存；speed>0 的形状每 200ms 刷新一次。
        多层背景叠加时，绘制开销几乎降为零。 */
+    /* 临时通道（preview 缩略图专用）。见文件上方 _bgEphemeral 的说明。
+       关键 1：必须把**缩略图空间的 w/h** 传给 _presetFn，而不是只缩放 ctx。
+       关键 2：降采样系数取 min(z, maxPx/最长边) —— z 是形状在缩略图里的
+       真实缩放（0.17~0.34），仅用小画布上限会漏掉绝大多数字形（它们本就
+       小于上限）。 */
+    if (_bgEphemeral) {
+      var _zS = (_bgEphemeral.scale || 1) * (_bgEphemeral.ss || 1);
+      var _k = Math.min(_zS, _bgEphemeral.maxPx / Math.max(1, Math.max(w, h)));
+      if (!(_k > 0) || !isFinite(_k)) _k = 1;
+      var _ew = Math.max(1, Math.round(w * _k));
+      var _eh = Math.max(1, Math.round(h * _k));
+      var _ec = _bgEphemeral.canvas, _ep = _bgEphemeral.ctx;
+      if (_ec.width !== _ew || _ec.height !== _eh) { _ec.width = _ew; _ec.height = _eh; }
+      _ep.setTransform(1, 0, 0, 1, 0, 0);
+      _ep.clearRect(0, 0, _ew, _eh);
+      _ep.save();
+      if (_glow > 0.01) { _ep.shadowBlur = 12 * _glow * _pulse * _k; _ep.shadowColor = _gc; }
+      else { _ep.shadowBlur = 0; }
+      /* 网格预算由 _pxGrid 在临时通道下自行读取（见 _pxGrid 内 cellBudget 分支）。 */
+      try { _presetFn(_ep, 0, 0, _ew, _eh, _c1, _c2, 1.0, _gc, _glow); } catch (e) { }
+      _ep.restore();
+      var _edA = alpha;
+      if (_psp > 0.0001) _edA = alpha * (0.85 + 0.15 * _pulse);
+      g.globalAlpha = _edA;
+      g.imageSmoothingEnabled = false;
+      g.drawImage(_ec, 0, 0, _ew, _eh, x, y, w, h);
+      g.globalAlpha = 1;
+      g.restore();
+      return;
+    }
     var _pcache = _presetRenderCache.get(sh);
     if (!_pcache) {
       _pcache = { key:null, canvas:null, lastUpdate:0 };
@@ -1156,6 +1218,27 @@ function _pxGrid(g,x,y,w,h,cols,rows,fn){
   var useRows = _autoRows > rows ? _autoRows : rows;
   if (useCols > 2000) useCols = 2000;
   if (useRows > 1500) useRows = 1500;
+  /* === 临时通道（preview 缩略图）下的网格预算 ===
+     多个 _ps* 函数给网格设了 Math.max(60/40,…) 之类下限，
+     即便传入缩略图尺寸的 w/h 也压不下去（440 个形状仍要 ~590 万格）。
+     缩略图只有 340x150，完全不需要这种密度 → 按面积预算等比收缩两侧。
+     注意 cs/rs 归一化对「缩小」同样成立：fn 看到的 c*cs 依旧落在 0..cols，
+     只是采样点变稀，图案语义（轮廓/雪线/噪点）不变。
+     仅当 _bgEphemeral 激活时生效 → 游戏内路径逐字不变（零回归）。 */
+  if (typeof _bgEphemeral === 'object' && _bgEphemeral && _bgEphemeral.cellBudget > 0) {
+    var _area = useCols * useRows;
+    /* 预算 = 画布面积 / 每格像素²（w,h 此时已是**画布空间**尺寸）。
+       ppc=每格覆盖多少画布像素：越小越精细、越慢。
+       再用 cellBudget 作绝对上限（跨整屏的大形状不至于失控）。 */
+    var _ppc = _bgEphemeral.pxPerCell > 0 ? _bgEphemeral.pxPerCell : 2.5;
+    var _tgt = Math.ceil((w * h) / (_ppc * _ppc));
+    var _bud = Math.max(48, Math.min(_bgEphemeral.cellBudget, _tgt));
+    if (_area > _bud) {
+      var _f = Math.sqrt(_bud / _area);
+      useCols = Math.max(2, Math.round(useCols * _f));
+      useRows = Math.max(2, Math.round(useRows * _f));
+    }
+  }
   if(!(useCols>=1))useCols=1;
   if(!(useRows>=1))useRows=1;
   var cs = cols / useCols;
@@ -3167,6 +3250,19 @@ function stepPlayerPhysics(p,keys,dt,solids,ghosts,mods){
       var r=solids[i];
       if(!rectsOverlap(p,r))continue;
       var ol=(p.x+p.w)-r.x,or=(r.x+r.w)-p.x;
+      var ot=(p.y+p.h)-r.y,ob=(r.y+r.h)-p.y;
+      var xPen=ol<or?ol:or, yPen=ot<ob?ot:ob;
+      /* 正常游玩时一个子步在 X 上最多只移动 3px（steps 已按 |v|/3 切分），
+         所以 xPen 必然 ≲3px —— 直接走「就近边吸附」，与旧版逐字一致。
+         只有 xPen 明显超出这个量级（= 玩家已被外部因素塞进实体深处，
+         正常物理绝不会出现）且 Y 向侵入更浅时，才改走「最小平移轴」：
+         沿 Y 把玩家推出（位移量 = yPen，很小），绝不沿 X 横推。
+         这彻底消除了「嵌入宽实体 → 按最近边横弹几百像素」这条反常识路径。 */
+      if(xPen>10&&yPen<xPen){
+        if(ot<ob)p.y=r.y-p.h;else p.y=r.y+r.h;
+        p.vy=0;stepVY=0;
+        continue;
+      }
       if(ol<or){p.x=r.x-p.w;p.onWall=-1;}
       else{p.x=r.x+r.w;p.onWall=1;}
       p.vx=0;stepVX=0;
@@ -3176,6 +3272,16 @@ function stepPlayerPhysics(p,keys,dt,solids,ghosts,mods){
       var r2=solids[i2];
       if(!rectsOverlap(p,r2))continue;
       var ot=(p.y+p.h)-r2.y,ob=(r2.y+r2.h)-p.y;
+      var ol2=(p.x+p.w)-r2.x,or2=(r2.x+r2.w)-p.x;
+      var yPen2=ot<ob?ot:ob, xPen2=ol2<or2?ol2:or2;
+      /* 与水平求解器对称：Y 向侵入已大到不可能是正常移动造成的
+         （子步垂直位移 ≤3px），而 X 向侵入更浅时，沿 X 推出，
+         避免「嵌入很高的实体 → 按上下最近边弹出很远」。 */
+      if(yPen2>10&&xPen2<yPen2){
+        if(ol2<or2)p.x=r2.x-p.w;else p.x=r2.x+r2.w;
+        p.vx=0;stepVX=0;
+        continue;
+      }
       if(ot<ob){
         p.y=r2.y-p.h;
         if(p.gravityDir>0){p.grounded=true;p.canDoubleJump=true;}
@@ -3187,7 +3293,7 @@ function stepPlayerPhysics(p,keys,dt,solids,ghosts,mods){
       }
     }
   }
-  if(ghosts)for(var gi=0;gi<ghosts.length;gi++)collideGhost(p,ghosts[gi]);
+  if(ghosts)for(var gi=0;gi<ghosts.length;gi++)collideGhost(p,ghosts[gi],solids);
   if(!p.grounded&&FEEL.edgeSnapDist>0){
     if(p.gravityDir>0&&p.vy>0){
       for(var es=0;es<solids.length;es++){
@@ -3230,7 +3336,28 @@ function stepPlayerPhysics(p,keys,dt,solids,ghosts,mods){
   p.squashVX+=(targetSX-p.squashX)*springK;p.squashVX*=damping;p.squashX+=p.squashVX;
   p.squashVY+=(targetSY-p.squashY)*springK;p.squashVY*=damping;p.squashY+=p.squashVY;
 }
-function collideGhost(p,g){
+/* 幽灵【带动】的逐轴预检：把玩家移动到 (x,y) 后是否与任一实体重叠。
+   用途见 updatePlay 里 p.onGhost 分支 —— 防止带动把玩家顶进实体内部。
+   （一旦嵌入，stepPlayerPhysics 的水平求解器会按"最近边"把玩家弹出；
+     若被嵌入的实体很宽，最近的边可能是远端，单帧能弹几百像素 → 反常识瞬移。） */
+function solidBlocksAt(p,x,y,solids){
+  if(!solids||!solids.length)return false;
+  var t={x:x,y:y,w:p.w,h:p.h};
+  for(var i=0;i<solids.length;i++){if(rectsOverlap(t,solids[i]))return true;}
+  return false;
+}
+/* 吸附的落点预检：吸附后玩家的新位置是否落进实体内部。
+   这是「卡墙后长距离瞬移」的第二条、也是最后一条源头：
+   幽灵沿轨迹上升时自身不与实体碰撞（可以钻进天花板），
+   若此时把玩家强行吸附到幽灵顶面 p.y=gr.y-p.h，玩家就被塞进天花板里；
+   下一帧 stepPlayerPhysics 的水平求解器只看 X 轴（ol/or 取小者），
+   于是按「天花板左边缘」把玩家横推——天花板越宽推得越远（实测 268px），
+   玩家随即离开 chamber → 触发"出界死"，观感就是「诡异地瞬移很远然后死掉」。
+   这里在吸附前预判：若吸附落点会与实体重叠，就**放弃这次吸附**，
+   玩家保持在原地（下一个物理帧正常下落/落地），外观上就是「幽灵钻进了天花板，
+   我没跟上去」，完全符合直觉，且不产生任何可见的兜底痕迹。
+   solids 为可选参数：不传时行为与旧版逐字一致（旧调用点零回归）。 */
+function collideGhost(p,g,solids){
   var gr={x:g.x,y:g.y,w:8,h:8};
   if(!rectsOverlap(p,gr))return false;
   var towardGround=p.vy*p.gravityDir>=0;
@@ -3239,7 +3366,9 @@ function collideGhost(p,g){
     if(overlapTop>0&&overlapTop<12&&p.x+p.w>gr.x&&p.x<gr.x+gr.w){
       var hDist=Math.abs((p.x+p.w/2)-(gr.x+4));
       if(hDist<12&&(towardGround||overlapTop<6)){
-        p.y=gr.y-p.h;p.vy=0;p.grounded=true;p.canDoubleJump=true;p.onGhost=g;
+        var snapY=gr.y-p.h;
+        if(solidBlocksAt(p,p.x,snapY,solids))return false;
+        p.y=snapY;p.vy=0;p.grounded=true;p.canDoubleJump=true;p.onGhost=g;
         return true;
       }
     }
@@ -3248,12 +3377,69 @@ function collideGhost(p,g){
     if(overlapBottom>0&&overlapBottom<12&&p.x+p.w>gr.x&&p.x<gr.x+gr.w){
       var hDist2=Math.abs((p.x+p.w/2)-(gr.x+4));
       if(hDist2<12&&(towardGround||overlapBottom<6)){
-        p.y=gr.y+gr.h;p.vy=0;p.grounded=true;p.canDoubleJump=true;p.onGhost=g;
+        var snapY2=gr.y+gr.h;
+        if(solidBlocksAt(p,p.x,snapY2,solids))return false;
+        p.y=snapY2;p.vy=0;p.grounded=true;p.canDoubleJump=true;p.onGhost=g;
         return true;
       }
     }
   }
   return false;
+}
+/* 线段是否与任一实体相交（Liang–Barsky 裁剪判定）。
+   用途：抽稀轨迹时防止产生"横穿实体"的直线段 —— 幽灵回放是在相邻采样点之间
+   做**线性插值**的，一旦某个新段横穿墙体，幽灵就会"直接穿墙飞过去"。 */
+function segCrossesSolids(x1,y1,x2,y2,solids,margin){
+  if(!solids||!solids.length)return false;
+  var m=margin||0;
+  var dx=x2-x1,dy=y2-y1;
+  for(var i=0;i<solids.length;i++){
+    var r=solids[i];
+    var rx=r.x-m,ry=r.y-m,rw=r.w+m*2,rh=r.h+m*2;
+    var t0=0,t1=1,hit=true;
+    var pp=[-dx,dx,-dy,dy];
+    var qq=[x1-rx,rx+rw-x1,y1-ry,ry+rh-y1];
+    for(var k=0;k<4;k++){
+      if(Math.abs(pp[k])<1e-9){if(qq[k]<0){hit=false;break;}continue;}
+      var t=qq[k]/pp[k];
+      if(pp[k]<0){if(t>t1){hit=false;break;}if(t>t0)t0=t;}
+      else{if(t<t0){hit=false;break;}if(t<t1)t1=t;}
+    }
+    if(hit)return true;
+  }
+  return false;
+}
+/* 轨迹抽稀（**安全版**）：目标是"尽量跳着取一半"，但每一条被接受的段
+   都必须先通过"不与实体相交"的检查 —— 幽灵回放是在相邻采样点之间做
+   线性插值的，任何一条横穿实体的段都会让幽灵"直接穿墙飞过去"。
+
+   做法（贪心）：从已接受的点 i 出发，先尝试跳过 2 步（=抽稀一半），
+   若该直线段穿墙就把落点逐步往回缩，直到"不穿墙"或缩到相邻点为止。
+   因为玩家真实走过的相邻两点之间不可能穿墙（物理约束），
+   所以最坏情况下退化成"不抽稀"，绝不会产出一条穿墙段。
+
+   对比"先整段取一半、再把穿墙段的中间点补回来"的做法：
+   后者在墙较厚、采样点较稀时，补回被丢弃的点仍然可能穿墙；
+   贪心法从构造上就保证了每条接受段都经过验证。 */
+function decimateTrajectory(traj,solids,cap){
+  var n=traj.length;
+  if(n<=2)return traj.slice();
+  var lim=cap||6000;
+  var hasSolids=!!(solids&&solids.length);
+  var out=[traj[0]];
+  var i=0;
+  while(i<n-1&&out.length<lim-1){
+    var j=Math.min(n-1,i+2);            /* 先试"跳过 1 点"（约 50% 抽稀） */
+    if(hasSolids){
+      while(j>i+1&&segCrossesSolids(
+        traj[i].x+4,traj[i].y+4,traj[j].x+4,traj[j].y+4,solids,3))j--;
+    }
+    out.push(traj[j]);
+    i=j;
+  }
+  /* 死亡时刻那一点必须保留：它是幽灵的爆炸位置（_explosionX/_explosionY） */
+  if(out[out.length-1]!==traj[n-1])out.push(traj[n-1]);
+  return out;
 }
 function compressTrajectory(traj){
   var out=[],stillCount=0;
@@ -3348,13 +3534,17 @@ function triggerExplosion(x,y,source){
 }
 
 /* ============ 幽灵 ============ */
-function PlayGhost(trajectory,dieX,dieY,originId,hasExplosion){
+function PlayGhost(trajectory,dieX,dieY,originId,hasExplosion,sampleStride){
   this.trajectory=trajectory.map(function(p){return{x:p.x,y:p.y};});
   this.progress=0;this.x=dieX;this.y=dieY;
   this.lastX=dieX;this.lastY=dieY;
   this.trail=[];for(var i=0;i<8;i++)this.trail.push({x:dieX,y:dieY});
   this.originId=originId||'default';
   this.hasExplosion=!!hasExplosion;
+  /* 录制时的采样步长：每个轨迹索引代表 sampleStride 个仿真帧。
+     轨迹被抽稀过（步长>1）时，回放推进必须按同比例放慢索引速度，
+     否则幽灵会在世界里变快。缺省 1 = 未抽稀，行为与旧版完全一致。 */
+  this.sampleStride=sampleStride||1;
   this._pendingExplosion=false;
   this._explosionX=0;this._explosionY=0;
   this.released=false;
@@ -3393,7 +3583,10 @@ PlayGhost.prototype.update=function(){
     this._speedMul=1;
   }
   var speed=baseSpeed*this._speedMul;
-  this.progress+=speed;
+  /* 索引推进速度按采样步长反比缩放：抽稀后每个索引代表更多帧，
+     只有相应放慢索引速度，幽灵在**世界里的移动速度**才与录制时一致
+     （否则抽稀过的轨迹会让幽灵看起来变快）。 */
+  this.progress+=speed/(this.sampleStride||1);
 
   var L=this.trajectory.length-1;
   if(L<1){ this.offScreen=false; this.fadeAlpha=1; return; }
@@ -3416,7 +3609,9 @@ PlayGhost.prototype.update=function(){
   this.offScreen=offScreen;
 
   // 轨迹首尾淡入/淡出，隐藏回绕瞬移（保留原逻辑）
+  // 抽稀后一个索引代表更多帧 → 淡入淡出带按步长收窄，保持它在世界里的长度不变
   var fadeRange=Math.min(8,Math.floor(L/4));
+  if((this.sampleStride||1)>1)fadeRange=Math.round(fadeRange/(this.sampleStride||1));
   if(fadeRange<2)fadeRange=2;
   var a=1;
   if(this.progress<fadeRange)a=this.progress/fadeRange;
@@ -3510,6 +3705,14 @@ var Play={
   waterBubbleTimer:10,waterBubbleMax:10,_inWater:false,_smokeCanvas:null,
   worldBounds:null,cam:null,deathCount:0,
   trajectory:[],dashTrajectory:[],ghosts:[],particles:[],
+  /* 轨迹采样状态（见 updatePlay 里的录制逻辑）：
+     _trajStride   = 当前每个索引代表多少个仿真帧（点数超限抽稀后按真实压缩比放大）；
+     _trajTick     = 距上一个记录点已过的帧数；
+     _stillFrames  = 当前这段"疑似静止"已持续多少帧；
+     _stillBaseX/Y = 这段"疑似静止"的锚点位置（漂移判定的基准）；
+     _trajDecimAt  = 上次尝试抽稀时的轨迹长度（避免逐帧重算的节流水位）。
+     轨迹清空后会在录制处自动复位。 */
+  _trajStride:1,_trajTick:0,_stillFrames:0,_stillBaseX:0,_stillBaseY:0,_trajDecimAt:0,
   currentRespawnOrigin:'default',currentFlag:null,flagsCollected:0,
   placedFlags:[], /* === flag/ghost v2 === */
   lives:3,maxLives:3,
@@ -3532,6 +3735,10 @@ function startPlay(){
    'trophies','switches','switchDoors','waters','smokes','waterGrasses'
   ].forEach(function(k){Play[k]=[];});
   Play.ghosts=[];Play.particles=[];Play.trajectory=[];Play.dashTrajectory=[];
+  /* 轨迹采样状态必须与轨迹一起复位：否则上一关抽稀放大过的 _trajStride
+     会残留，让新关卡的幽灵轨迹一开始就是稀疏的（观感=幽灵跳着走）。 */
+  Play._trajStride=1;Play._trajTick=0;Play._stillFrames=0;
+  Play._stillBaseX=Play.spawnX;Play._stillBaseY=Play.spawnY;Play._trajDecimAt=0;
   Play.deathCount=0;Play.won=false;
   Play.currentRespawnOrigin='default';Play.currentFlag=null;Play.placedFlags=[];
   Play.flagsCollected=lv.initialFlags||0;
@@ -4233,7 +4440,16 @@ function updatePlay(dt){
   if(p.onGhost){
     var g=p.onGhost;
     var dx=g.x-g.lastX,dy=g.y-g.lastY;
-    if(Math.abs(dx)<5&&Math.abs(dy)<5){p.x+=dx;p.y+=dy;}
+    if(Math.abs(dx)<5&&Math.abs(dy)<5){
+      /* 逐轴预检后再搬：旧实现直接 p.x+=dx;p.y+=dy，不看实体，
+         会把玩家顶进墙/天花板内部；而 stepPlayerPhysics 的水平求解器是
+         "按最近边吸附"，嵌入宽实体时最近边可能在远端 → 单帧瞬移几百像素（反常识）。
+         这里被挡的那个轴不搬：骑手会沿墙自然滑动（像合格的移动平台），
+         从源头杜绝"嵌入"，也就永远不会触发那条反常识的弹出。
+         正常骑乘（不与实体重叠）行为与旧版逐字一致。 */
+      if(!solidBlocksAt(p,p.x+dx,p.y,allSolids))p.x+=dx;
+      if(!solidBlocksAt(p,p.x,p.y+dy,allSolids))p.y+=dy;
+    }
   }
   // 推可移动方块
   var pushDir=0;
@@ -4431,8 +4647,82 @@ function updatePlay(dt){
       l2._vis=target+(cur-target)*Math.exp(-speed*dt);
     }
   })();
-  Play.trajectory.push({x:p.x,y:p.y});
-  if(Play.trajectory.length>1500)Play.trajectory.shift();
+  /* ---- 轨迹录制（幽灵回放的数据源）----
+     旧实现：每帧 push 一点，超过 1500 点就 shift() 丢弃**最早**的点。
+     遍历顺序是 trajectory[0]（最早）→ 末尾（死亡时刻），所以 shift() 砍掉的开头
+     正是幽灵轨迹的起点 —— 玩家走远路（一关 2162~10810 帧，远超 1500）时开头必然被裁掉，
+     死亡后生成的幽灵就从半路开始播放。这就是"走得比较远时幽灵轨迹缺开头"的根因。
+
+     现行两条规则：
+     ① **静止垃圾时间压缩**（用户要求）：玩家原地不动属于无意义的占用，
+        连续静止超过 STILL_KEEP 帧后就不再逐帧记录 —— 轨迹里只留"进入静止的那一点"
+        与"恢复运动的那一点"，中间的空档由幽灵在这两点间平滑掠过（两点重合或极近，
+        观感上就是幽灵在原地停留了一下）。既省配额，也让轨迹更干净。
+     ② **超限抽稀（安全版）**：点数超 TRAJ_CAP 时整段抽稀一半（首尾都保留），
+        并把每个索引代表的帧数按实际压缩比放大（见下方注释）。
+        关键：抽稀会拉大相邻采样点间距，而幽灵回放是**相邻两点间线性插值**的，
+        一旦某个新段变成横穿实体的直线，幽灵就会"直接穿墙飞过去"——
+        这正是长时间录制（数小时静止把配额撑爆）后暴露的问题。
+        所以抽稀改走 `decimateTrajectory`：凡横穿实体的新段就把被丢弃的原点补回来。 */
+  var TRAJ_CAP=12000;          /* 配额：静止压缩后足够长，正常一关远远用不到 */
+  var STILL_KEEP=300;          /* 静止垃圾时间：最多保留 5s（300 帧 @60fps） */
+  /* "在动"判定阈值。取值必须**小于一个正常的行走步长**（maxWalkSpeed=1.85px/帧），
+     这样玩家一起步就在第 1 帧被判定为在动、轨迹立刻续上，接缝长度 ≤ 一个正常步长
+     → 幽灵回放时那一段与普通段无法区分（真正"看不出兜底"）。
+     若取大值（如 8px），一次起步会有 ~5 帧、约 9px 的真实位移被漏记，压缩成一段，
+     幽灵会在此处以数倍速掠过 —— 这是肉眼可见的"抽一下"。
+     取 1.5 仍远大于实测的静止抖动（50 个关卡全部为 **精确 0**，见 _diagjitter.cjs），
+     因此绝不会把真静止误判成在动而让压缩失效。 */
+  var STILL_DRIFT=1.5;
+  /* 轨迹为空 = 新一次录制（开局或刚死亡重生）→ 采样状态整体复位。
+     注意必须在这里复位，否则上一轮抽稀放大的 _trajStride 会残留，
+     让新幽灵的轨迹一开始就是稀疏的。 */
+  if(Play.trajectory.length===0){
+    Play._trajStride=1;Play._trajTick=0;Play._stillFrames=0;
+    Play._stillBaseX=p.x;Play._stillBaseY=p.y;Play._trajDecimAt=0;
+  }
+  /* 静止判定：只看"相对锚点的累计漂移是否达到 STILL_DRIFT"。
+     单一条判据即可覆盖全部情形：
+       · 正常行走/跳跃   → 起步第 1~2 帧漂移就超过 1.5px → 立刻算在动；
+       · 骑幽灵被缓慢带动（0.2~0.8px/帧）→ 数帧内漂移也超过 1.5px → 算在动，
+         绝不会被误判成静止而被截断（旧版正是栽在这种"慢速移动被当静止"上）；
+       · 真的站着不动   → 漂移恒为 0（已实测 50 关全部精确为 0）→ 持续累加
+         静止帧数，超过 5s 后停止记录。
+     一旦判定在动，锚点重置到当前位置，静止计时从零开始。 */
+  var _drift=Math.max(Math.abs(p.x-Play._stillBaseX),Math.abs(p.y-Play._stillBaseY));
+  var _inMotion=(_drift>=STILL_DRIFT);
+  if(_inMotion){Play._stillFrames=0;Play._stillBaseX=p.x;Play._stillBaseY=p.y;}
+  else Play._stillFrames++;
+  /* 静止超过 5s 后停止记录 —— 这段对幽灵回放毫无信息量，
+     跳过它观感上完全不可见（前后两点位置相同，幽灵只是原地停留了一下）。 */
+  var _allowRecord=_inMotion||Play._stillFrames<=STILL_KEEP;
+  Play._trajTick++;
+  /* 停录期间不让 tick 无限膨胀：恢复运动的那一帧应当立即记录。 */
+  if(!_allowRecord&&Play._trajTick>Play._trajStride)Play._trajTick=Play._trajStride;
+  if(_allowRecord&&Play._trajTick>=Play._trajStride){
+    Play._trajTick=0;
+    Play.trajectory.push({x:p.x,y:p.y});
+    if(Play.trajectory.length>TRAJ_CAP&&Play.trajectory.length-Play._trajDecimAt>256){
+      /* 目标压到 0.7×cap（留水位）：若只压到 cap，下一帧又立刻超限 →
+         每帧都跑一次 O(n×实体数) 的抽稀，会造成周期性卡顿。压到水位以下
+         后，需要再积累 0.3×cap 才会再次触发。 */
+      var _target=Math.floor(TRAJ_CAP*0.7);
+      var _thPrev=Play.trajectory;
+      var _thOut=decimateTrajectory(_thPrev,allSolids,_target);
+      var _nB=_thPrev.length,_nA=_thOut.length;
+      /* 每个索引代表的帧数按"真实压缩比"放大：抽稀前后必须覆盖同样的总时长，
+         即 nAfter * stride' = nBefore * stride → stride' = stride * nBefore/nAfter。
+         贪心补点会让实际点数多于预期，若仍固定 ×2，幽灵在世界里会比玩家慢。 */
+      if(_nA>0&&_nB>_nA){
+        Play._trajStride*=(_nB/_nA);
+        Play._trajStride=Math.max(1,Play._trajStride);
+        Play.trajectory=_thOut;
+      }
+      /* 无论成功与否都记下这次尝试的位置：即使极罕见地"一点都压不动"，
+         也只是继续追加（每 256 点才重试一次），不会退化成逐帧重算。 */
+      Play._trajDecimAt=Play.trajectory.length;
+    }
+  }
   var inChamber=false;
   var chambers=LevelContext.levels[LevelContext.currentIdx].chambers;
   for(var ci=0;ci<chambers.length;ci++){
@@ -4680,7 +4970,8 @@ function diePlay(){
       compressed=[{x:_p0.x,y:_p0.y},{x:_p0.x,y:_p0.y}];
     }
     var wasSuicide=Play._dyingBySuicide===true;
-    var newGhost=new PlayGhost(compressed,Play.player.x,Play.player.y,Play.currentRespawnOrigin,wasSuicide);
+    // 把录制时的采样步长一并交给幽灵：抽稀过的轨迹回放要按同比例放慢索引推进
+    var newGhost=new PlayGhost(compressed,Play.player.x,Play.player.y,Play.currentRespawnOrigin,wasSuicide,Play._trajStride);
     Play.ghosts=Play.ghosts.filter(function(g){return g.originId!==Play.currentRespawnOrigin;});
     Play.ghosts.push(newGhost);
     if(Play.ghosts.length>4)Play.ghosts.shift();
@@ -4831,7 +5122,12 @@ function renderPlay(){
     var ci=Math.floor(cur);
     if(ci<0)ci=0;
     if(ci>traj.length-1)ci=traj.length-1;
-    var hs=Math.max(0,ci-11),he=Math.min(traj.length-1,ci+11);
+    /* 白色高亮段：原本固定 ±11 个索引。抽稀后一个索引代表更多帧，
+       若不按步长收窄，亮段会随抽稀被拉长（看起来像一长条白线）。
+       收窄到 max(3, 11/stride) 后，亮段在世界坐标里的长度基本不变。 */
+    var _hSpan=11;
+    if((gh.sampleStride||1)>1)_hSpan=Math.max(3,Math.round(_hSpan/(gh.sampleStride||1)));
+    var hs=Math.max(0,ci-_hSpan),he=Math.min(traj.length-1,ci+_hSpan);
     if(he>hs){
       g.strokeStyle='rgba(255,255,255,'+(0.92*fa)+')';
       g.lineWidth=lineW2;

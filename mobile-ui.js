@@ -105,9 +105,16 @@
   };
   /* 设计单位下的清晰字字号：opt.px=true 时按“屏幕 CSS 像素”给定，跨机型一致 */
   function labFont(size, px) { return px ? MU.CSS(size) : size; }
-  /* 老式 LCD 上的「发光刻印」文字：①凹刻暗影 → ②发光填充 → ③顶缘高光。
+  /* 判断颜色明暗（0=黑,1=白）：用来决定描边该用亮还是暗，保证任何底色上都能分开。 */
+  MU.lum = function (hex) {
+    const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex || '');
+    if (!m) return 0.5;
+    return (0.299 * parseInt(m[1], 16) + 0.587 * parseInt(m[2], 16) + 0.114 * parseInt(m[3], 16)) / 255;
+  };
+
+  /* 老式 LCD 上的「发光刻印」文字：①凹刻暗影 → ②（可选描边）→ ③发光填充 → ④顶缘高光。
      塑料键面上的丝印用 opt.crisp=true 关闭发光/高光，保证笔画清晰不糊。
-     opt: {align, weight, glow, shadow, alpha, hi, crisp} */
+     opt: {align, weight, glow, shadow, alpha, hi, crisp, outline} */
   MU.inset = function (ctx, s, x, y, size, color, opt) {
     opt = opt || {};
     const crisp = !!opt.crisp;
@@ -117,6 +124,20 @@
     ctx.font = (opt.weight || 600) + ' ' + size + 'px ' + MU.FONT;
     ctx.textAlign = opt.align || 'left';
     ctx.textBaseline = 'middle';
+    /* 描边通道：在字形外扩一圈**对比色**细边，让字从同色系底面上"立"起来。
+       这是提升可读性而不改主色的关键——字的填充色仍是原键面配色（不违和），
+       只增加一圈极细的分离边。明暗自动取反：深字配亮边、亮字配暗边。 */
+    if (opt.outline) {
+      const l = MU.lum(color);
+      const oc = opt.outline === true
+        ? (l < 0.5 ? 'rgba(255,255,255,.72)' : 'rgba(0,0,0,.62)')
+        : opt.outline;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = Math.max(1.6, size * 0.17);
+      ctx.strokeStyle = oc;
+      ctx.strokeText(String(s), x, y);
+    }
     if (opt.shadow !== false) {
       ctx.fillStyle = 'rgba(0,0,0,' + (crisp ? 0.62 : MU.lcd.bl) + ')';
       ctx.fillText(String(s), x, y + Math.max(1, size * 0.075));
@@ -207,13 +228,17 @@
   /* 参考真实 Game Boy Color（Atomic Purple 等）：D-Pad / A / B 为**哑光深灰塑料**
      （并非全黑，带一点冷灰蓝），字符为浅灰白；彩色键为透明塑料染色的实色版本。
      键面高光→本色→暗面 a/b/c；rim：座圈；gate：按下时的凹井暗影；glyph：符号/标签色。 */
+  /* 键面字色统一为白色（用户明确要求"都改成白色字"）。
+     白色在亮键面（金/薄荷绿）上容易被"吃掉"，因此 keyInk 会给白色字
+     描一圈**深色**分离边（见 MU.keyInk / MU.inset 的 outline 通道），
+     既满足"白字"又保证任何键面上都看得清。 */
   MU.PAL = {
-    neutral: { a: '#5c6570', b: '#3c434c', c: '#262c34', rim: '#141a20', gate: 'rgba(0,0,0,.46)', glyph: '#f2f5f8' },
-    gold: { a: '#ffdf8e', b: '#e2ab36', c: '#a9761a', rim: '#5d3d06', gate: 'rgba(40,22,0,.42)', glyph: '#3a2604' },
-    teal: { a: '#96e3d2', b: '#33a691', c: '#166f5f', rim: '#0a362d', gate: 'rgba(0,28,22,.42)', glyph: '#04302a' },
-    green: { a: '#a8d98a', b: '#63a850', c: '#3a7233', rim: '#1a3d16', gate: 'rgba(8,32,4,.42)', glyph: '#123a0d' },
-    red: { a: '#f2959e', b: '#cd4a5e', c: '#8f1f31', rim: '#4e0f1a', gate: 'rgba(48,4,12,.42)', glyph: '#420a12' },
-    violet: { a: '#c3b3ef', b: '#9b7fe0', c: '#6a4fc4', rim: '#2f2166', gate: 'rgba(22,8,48,.46)', glyph: '#1e1450' },
+    neutral: { a: '#5c6570', b: '#3c434c', c: '#262c34', rim: '#141a20', gate: 'rgba(0,0,0,.46)', glyph: '#ffffff' },
+    gold: { a: '#ffdf8e', b: '#dfa52c', c: '#9c6a12', rim: '#5d3d06', gate: 'rgba(40,22,0,.42)', glyph: '#ffffff' },
+    teal: { a: '#96e3d2', b: '#2b9c88', c: '#10614f', rim: '#0a362d', gate: 'rgba(0,28,22,.42)', glyph: '#ffffff' },
+    green: { a: '#a8d98a', b: '#589b46', c: '#2f6428', rim: '#1a3d16', gate: 'rgba(8,32,4,.42)', glyph: '#ffffff' },
+    red: { a: '#f2959e', b: '#c53f52', c: '#841a2b', rim: '#4e0f1a', gate: 'rgba(48,4,12,.42)', glyph: '#ffffff' },
+    violet: { a: '#c3b3ef', b: '#8f72da', c: '#5c42b6', rim: '#2f2166', gate: 'rgba(22,8,48,.46)', glyph: '#ffffff' },
   };
 
   /* -------------------------------------------------------------- 几何布局 */
@@ -404,7 +429,13 @@
      做法：电路板（以及壳内的厚度暗角）画在一个独立的、会随倾斜位移的平面上；
      外壳（屏幕包边 / LCD / 按键 / 螺钉 / 玻璃高光）全部固定不动。
      数据源优先级：设备方向传感器（陀螺仪/加速度计）→ 手动 setTilt()（测试/兜底）。 */
-  MU.PARALLAX = 9;              /* 电路板最大位移（设计单位） */
+  /* 幅度：设计宽度为 540 单位，PARALLAX 即"倾斜到位"时电路板的最大位移。
+     旧值 9 只占画幅 1.7%（真机约 6 CSS px），几乎看不出层次，廉价感明显；
+     调到 18（≈画幅 3.3%，真机约 13 CSS px）后，隔着屏幕能清楚感到板子在壳内
+     滑动 —— 与真实掌机"玻璃在前、PCB 在后"的纵深关系一致。
+     硬约束：PARALLAX 必须 ≤ PAD（此处留 12 单位余量），否则位移到极限时
+     电路板会从机身边缘露出、露出底色。 */
+  MU.PARALLAX = 18;             /* 电路板最大位移（设计单位） */
   MU.PAD = 30;                  /* 电路板四周预留余量，保证位移后仍铺满、不露边 */
   MU.parallaxOn = true;
   MU.tilt = { x: 0, y: 0 };     /* 平滑后的位移（设计单位） */
@@ -1015,21 +1046,41 @@
     }
   };
 
-  /* 键帽丝印：符号（像素图元）+ 标签（清晰非像素字，无发光以免糊）。bakeFace 与按下态共用。 */
+  /* 键帽丝印：符号（像素图元）+ 标签（清晰非像素字，无发光以免糊）。bakeFace 与按下态共用。
+     可读性策略（不改键面主色，避免"字和键色差太多很违和"）：
+     给符号与标签都加一圈**极细的对比色描边**——深色字配亮边、亮色字配暗边，
+     自动由 MU.lum(P.glyph) 决定。键面配色仍然是原样，只是多了分离边。 */
   MU.keyInk = function (ctx, c, cx, cy, r, P, inkAlpha) {
     const gu = MU.U(16.5);
+    const gy = cy - r * 0.29;
+    const glum = MU.lum(P.glyph);
+    const halo = glum < 0.5 ? 'rgba(255,255,255,.78)' : 'rgba(0,0,0,.68)';
     ctx.save();
     if (inkAlpha !== undefined) ctx.globalAlpha = inkAlpha;
+    /* ① 原有底部投影（保留：给出"刻进塑料"的厚度感） */
     ctx.globalAlpha *= 0.34;
-    MU.glyph(ctx, c.glyph, cx, cy - r * 0.29 + 1.2, gu, 'rgba(0,0,0,.95)');
+    MU.glyph(ctx, c.glyph, cx, gy + 1.2, gu, 'rgba(0,0,0,.95)');
     ctx.restore();
-    MU.glyph(ctx, c.glyph, cx, cy - r * 0.29, gu, P.glyph);
+
+    /* ② 环形描边：8 个方向的偏移各画一遍，形成一圈封闭细边。
+       偏移量取 1 个像素格，保证细而不糊。 */
+    ctx.save();
+    if (inkAlpha !== undefined) ctx.globalAlpha = inkAlpha * 0.92;
+    const o = Math.max(1, Math.round(gu * 0.9));
+    for (const [dx, dy] of [[-o, 0], [o, 0], [0, -o], [0, o], [-o, -o], [o, -o], [-o, o], [o, o]]) {
+      MU.glyph(ctx, c.glyph, cx + dx, gy + dy, gu, halo);
+    }
+    ctx.restore();
+
+    /* ③ 本体：符号用键面配色 */
+    MU.glyph(ctx, c.glyph, cx, gy, gu, P.glyph);
 
     /* 标签：以**屏幕 CSS 像素**给定字号并设下限 12px，保证小屏也看得清；
-       位置下移到键面下缘内侧，避免压到座圈。 */
-    const labCss = Math.max(12, Math.min(16, (r * scale) * 0.50));
+       位置下移到键面下缘内侧，避免压到座圈。字号略增 + 描边以提升可读性。 */
+    const labCss = Math.max(12.5, Math.min(17, (r * scale) * 0.52));
     const labSize = MU.CSS(labCss);
-    MU.inset(ctx, c.label, cx, cy + r * 0.43, labSize, P.glyph, { weight: 800, crisp: true, align: 'center', alpha: inkAlpha });
+    MU.inset(ctx, c.label, cx, cy + r * 0.43, labSize, P.glyph,
+      { weight: 800, crisp: true, align: 'center', alpha: inkAlpha, outline: true });
   };
 
   /* 按下态：座圈**固定不动**，只有键帽下沉 + 缩径 + 压暗 —— 这才是真实的

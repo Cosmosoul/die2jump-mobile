@@ -474,13 +474,61 @@ function normalize(data){const source=Array.isArray(data)?data:(data&&Array.isAr
     lv.feel=sanitizeFeel(lv.feel||(data&&data.feel));lv.camera=lv.camera||{};
     lv.initialLives=Math.max(1,Math.floor(lv.initialLives||3));lv.initialFlags=Math.max(0,Math.floor(lv.initialFlags||0));
     const order=(()=>{const m=String(lv.id).match(/(\d+)/);return m?Number(m[1]):i+1;})();
-    out.push({lv,key:'lv'+order+'#'+i,order,preview:preview(lv)});});
-  out.sort((a,b)=>a.order-b.order);return out;}
+    out.push({lv,key:'lv'+order+'#'+i,order,preview:null});});
+  out.sort((a,b)=>a.order-b.order);
+  /* === 缩略图惰性化（启动性能关键修复） ===
+     旧版在 normalize() 里对每关**同步**渲染 340x150 缩略图：20 关 × 约 250ms
+     → 阻塞主线程 5~90 秒（视机型），这正是"关卡文件一大就加载不出来"的根因。
+     而 preview 只在**绘制选关页**时才被读（game.js / mobile-ui.js 各一处），
+     因此改为按需计算 + 缓存：启动时一次都不算，进入选关页只算当前可见的几张。
+     其余关卡用浏览器空闲时间后台预热，翻页时基本已就绪。 */
+  out.forEach(r=>{
+    let _pv;
+    Object.defineProperty(r,'preview',{
+      configurable:true,enumerable:true,
+      get(){if(_pv===undefined)_pv=preview(r.lv);return _pv;},
+      set(v){_pv=v;}
+    });
+  });
+  schedulePreviewPrewarm(out);
+  return out;}
+/* 空闲预热：一次算一关，绝不与交互抢主线程。
+   刻意**跳过局内状态**（playing/pause/win/fail）：缩略图只在选关页用得到，
+   若在玩家操作时抢主线程算它会掉帧。等回到菜单/选关页再继续预热。 */
+function schedulePreviewPrewarm(recs){
+  if(!recs||!recs.length)return;
+  let i=0;
+  const busy=()=>{
+    const s=Game&&Game.state;
+    return s==='playing'||s==='pause'||s==='win'||s==='fail';
+  };
+  const step=()=>{
+    if(i>=recs.length)return;
+    if(busy()){scheduleNext();return;}      /* 局内 → 让路，稍后再试 */
+    try{void recs[i++].preview;}catch(e){}
+    scheduleNext();
+  };
+  const scheduleNext=()=>{
+    if(window.requestIdleCallback)requestIdleCallback(step,{timeout:2000});
+    else setTimeout(step,120);
+  };
+  const kick=()=>scheduleNext();
+  if(document.readyState==='complete')setTimeout(kick,1200);
+  else window.addEventListener('load',()=>setTimeout(kick,1200),{once:true});
+}
 function preview(lv){const c=document.createElement('canvas');c.width=340;c.height=150;const q=c.getContext('2d');q.imageSmoothingEnabled=false;
   const b=(lv.chambers||[]).reduce((b,ch)=>({x:Math.min(b.x,ch.x),y:Math.min(b.y,ch.y),r:Math.max(b.r,ch.x+ch.w),d:Math.max(b.d,ch.y+ch.h)}),{x:Infinity,y:Infinity,r:-Infinity,d:-Infinity});
   const bx=isFinite(b.x)?b:{x:0,y:0,r:200,d:88};const z=Math.min(340/(bx.r-bx.x),150/(bx.d-bx.y));
   q.fillStyle='#0c1520';q.fillRect(0,0,340,150);q.save();q.translate((340-(bx.r-bx.x)*z)/2,(150-(bx.d-bx.y)*z)/2);q.scale(z,z);q.translate(-bx.x,-bx.y);
-  for(const bg of lv.backgrounds.slice().sort((a,b2)=>(a.layer||0)-(b2.layer||0)))for(const s of bg.shapes||[])try{drawBgShape(q,s,s.x,s.y,s.w,s.h,s.alpha==null?.8:s.alpha,0,false,true,[],z);}catch(e){}
+  /* 缩略图只有 340x150（实际显示约 226x128），因此背景走「临时渲染通道」：
+     共享一块小画布、按 z（真实缩放 0.17~0.34）× 2 倍过采样降采样、
+     每格最多覆盖 2.5 画布像素、不写持久缓存。
+     此前直接走正常路径：每个形状都按真实尺寸（最大 3150x1432）独立占一块
+     离屏画布且永不释放 → 启动被阻塞近 90 秒、4K 下直接崩渲染进程。 */
+  if(typeof _bgEphBegin==='function')_bgEphBegin(1024,40000,z,2,2.5);
+  try{
+    for(const bg of lv.backgrounds.slice().sort((a,b2)=>(a.layer||0)-(b2.layer||0)))for(const s of bg.shapes||[])try{drawBgShape(q,s,s.x,s.y,s.w,s.h,s.alpha==null?.8:s.alpha,0,false,true,[],z);}catch(e){}
+  }finally{if(typeof _bgEphEnd==='function')_bgEphEnd();}
   for(const e of lv.elements){const a=getAdjacency(e,lv.elements);switch(e.type){case'platform':drawPlatformTo(q,e,a);break;case'ice':drawIceTo(q,e,a);break;case'movable':drawMovableTo(q,e,a);break;case'breakable':drawBreakableTo(q,e,a);break;case'flammable':drawFlammableTo(q,e,a);break;case'water':drawWaterTo(q,e,false);break;case'goal':drawGoalPortalShader(q,e,0);break;case'trophy':drawTrophyTo(q,e);break;case'switchDoor':drawSwitchDoorTo(q,e,false);break;case'switch':drawSwitchTo(q,e,false);break;case'gravityFlip':drawGravityZoneShader(q,e,0);break;case'door':q.fillStyle='#c19748';q.fillRect(e.x,e.y,e.w,e.h);break;case'spike':case'fallingSpike':q.fillStyle='#cf4e65';q.beginPath();q.moveTo(e.x,e.y+e.h);q.lineTo(e.x+e.w/2,e.y);q.lineTo(e.x+e.w,e.y+e.h);q.fill();break;case'spawn':q.fillStyle='#6affa9';q.fillRect(e.x,e.y-8,8,8);break;case'flagPickup':q.fillStyle='#edce61';q.fillRect(e.x,e.y,6,4);break;case'heart':q.fillStyle='#e46376';q.fillRect(e.x,e.y,7,6);break;case'laserRight':case'laserLeft':case'laserUp':case'laserDown':q.fillStyle='#ff4d6a';q.fillRect(e.x,e.y,7,7);break;case'disappear':q.fillStyle='rgba(190,170,255,.75)';q.fillRect(e.x,e.y,Math.max(6,e.w),Math.max(4,e.h));break;}}
   q.restore();return c;}
 function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/3)-1));Game.ready=true;screenKey='';}
