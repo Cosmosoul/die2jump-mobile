@@ -1201,10 +1201,13 @@
   }
 
   var SFX_DEFS = {
-    'jump': { dur: 0.18, gen: function (o, s, r) { p_tone(o, s, 0, 0.16, 320, 760, 0.5, 'sine', 0.004, 6); p_tone(o, s, 0, 0.12, 640, 1520, 0.18, 'sine', 0.002, 8); } },
-    'doubleJump': { dur: 0.18, gen: function (o, s, r) { p_tone(o, s, 0, 0.16, 520, 1080, 0.45, 'sine', 0.003, 7); p_tone(o, s, 0, 0.12, 1040, 2160, 0.15, 'sine', 0.002, 9); } },
-    'wallJump': { dur: 0.18, gen: function (o, s, r) { p_tone(o, s, 0, 0.15, 300, 720, 0.45, 'tri', 0.003, 7); p_noise(o, s, 0, 0.1, 0.2, 0.25, 10, r); } },
-    'land': { dur: 0.20, gen: function (o, s, r) { p_tone(o, s, 0, 0.18, 170, 70, 0.6, 'sine', 0.002, 7); p_noise(o, s, 0, 0.09, 0.25, 0.15, 12, r); } },
+    /* vol：该音效的独立音量系数（默认 1）。
+       起跳/落地这类**高频**操作音原本偏响，连按很吵 → 统一调低。
+       注意：只影响音量，不改波形/时长/音色。 */
+    'jump': { dur: 0.18, vol: 0.55, gen: function (o, s, r) { p_tone(o, s, 0, 0.16, 320, 760, 0.5, 'sine', 0.004, 6); p_tone(o, s, 0, 0.12, 640, 1520, 0.18, 'sine', 0.002, 8); } },
+    'doubleJump': { dur: 0.18, vol: 0.55, gen: function (o, s, r) { p_tone(o, s, 0, 0.16, 520, 1080, 0.45, 'sine', 0.003, 7); p_tone(o, s, 0, 0.12, 1040, 2160, 0.15, 'sine', 0.002, 9); } },
+    'wallJump': { dur: 0.18, vol: 0.55, gen: function (o, s, r) { p_tone(o, s, 0, 0.15, 300, 720, 0.45, 'tri', 0.003, 7); p_noise(o, s, 0, 0.1, 0.2, 0.25, 10, r); } },
+    'land': { dur: 0.20, vol: 0.6, gen: function (o, s, r) { p_tone(o, s, 0, 0.18, 170, 70, 0.6, 'sine', 0.002, 7); p_noise(o, s, 0, 0.09, 0.25, 0.15, 12, r); } },
     'step': { dur: 0.07, gen: function (o, s, r) { p_noise(o, s, 0, 0.045, 0.075, 0.045, 26, r); p_tone(o, s, 0, 0.04, 150, 105, 0.05, 'sine', 0.002, 22); } },
     'death': { dur: 0.60, gen: function (o, s, r) { p_tone(o, s, 0, 0.55, 520, 110, 0.5, 'saw', 0.005, 2.2); p_tone(o, s, 0.02, 0.5, 260, 90, 0.25, 'sine', 0.005, 2.5); p_noise(o, s, 0, 0.3, 0.2, 0.35, 4, r); } },
     'respawn': { dur: 0.50, gen: function (o, s, r) { p_tone(o, s, 0, 0.18, 440, 440, 0.4, 'sine', 0.005, 5); p_tone(o, s, 0.12, 0.18, 660, 660, 0.4, 'sine', 0.005, 5); p_tone(o, s, 0.24, 0.24, 880, 880, 0.4, 'sine', 0.005, 4); } },
@@ -1284,6 +1287,10 @@
       gain = clamp(1 - d / 420, 0.06, 1);
       panVal = clamp(dx / 200, -1, 1);
     }
+    /* 独立音量系数：起跳/落地等高频音效在 SFX_DEFS 里给了 vol<1，
+       只降音量、不改音色（距离衰减 gain 照旧相乘）。 */
+    var def = SFX_DEFS[SFX_ALIAS[name] || name];
+    if (def && typeof def.vol === 'number' && isFinite(def.vol)) gain *= def.vol;
     g.gain.value = gain;
 
     if (typeof ctx.createStereoPanner === 'function') {

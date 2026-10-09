@@ -516,20 +516,47 @@ function schedulePreviewPrewarm(recs){
   if(document.readyState==='complete')setTimeout(kick,1200);
   else window.addEventListener('load',()=>setTimeout(kick,1200),{once:true});
 }
+/* === 选关缩略图：只画「出生点一屏」（摄像机视口大小） ===
+   旧实现把**整个箱庭包围盒**（实测可达 2600×616）连同全部背景形状（253~482 个）
+   一起渲染，单张耗时 100~1035ms、50 关全量预热 10.9s，是选关/进游戏卡顿的主因。
+   改为只取出生点周围一个「一屏」窗口（默认 300×100，与摄像机 viewTarget 一致）：
+   窗口内需绘制的形状降到 11~22 个（相交面积仅 0.5~1%），且画面更聚焦、更像"关卡开场"。 */
+function previewWindow(lv){
+  const els=lv.elements||[];
+  const sp=els.find(e=>e&&e.type==='spawn');
+  const bb=(lv.chambers||[]).reduce((b,ch)=>({x:Math.min(b.x,ch.x),y:Math.min(b.y,ch.y),r:Math.max(b.r,ch.x+ch.w),d:Math.max(b.d,ch.y+ch.h)}),{x:Infinity,y:Infinity,r:-Infinity,d:-Infinity});
+  const W0=isFinite(bb.x)?bb:{x:0,y:0,r:200,d:88};
+  const cam=lv.camera||{};
+  /* 窗口尺寸 = 摄像机目标视口（与游戏内一屏一致）；缺省 300×100。 */
+  const wi=Math.max(120,Number(cam.viewW)||300),hi=Math.max(80,Number(cam.viewH)||100);
+  let cx=sp?sp.x+(sp.w||8)/2:(W0.x+W0.r)/2,cy=sp?sp.y+(sp.h||8)/2:(W0.y+W0.d)/2;
+  let x=cx-wi/2,y=cy-hi/2;
+  /* 与摄像机一致：世界比窗口小就居中，否则贴边 */
+  if(W0.r-W0.x<=wi)x=(W0.x+W0.r)/2-wi/2;else x=Math.max(W0.x,Math.min(W0.r-wi,x));
+  if(W0.d-W0.y<=hi)y=(W0.y+W0.d)/2-hi/2;else y=Math.max(W0.y,Math.min(W0.d-hi,y));
+  return{x,y,w:wi,h:hi};
+}
 function preview(lv){const c=document.createElement('canvas');c.width=340;c.height=150;const q=c.getContext('2d');q.imageSmoothingEnabled=false;
-  const b=(lv.chambers||[]).reduce((b,ch)=>({x:Math.min(b.x,ch.x),y:Math.min(b.y,ch.y),r:Math.max(b.r,ch.x+ch.w),d:Math.max(b.d,ch.y+ch.h)}),{x:Infinity,y:Infinity,r:-Infinity,d:-Infinity});
-  const bx=isFinite(b.x)?b:{x:0,y:0,r:200,d:88};const z=Math.min(340/(bx.r-bx.x),150/(bx.d-bx.y));
+  /* 用「出生点一屏」当包围盒（局部变量名沿用 bx，后续逻辑不变） */
+  const win=previewWindow(lv);const bx={x:win.x,y:win.y,r:win.x+win.w,d:win.y+win.h};
+  const z=Math.min(340/(bx.r-bx.x),150/(bx.d-bx.y));
   q.fillStyle='#0c1520';q.fillRect(0,0,340,150);q.save();q.translate((340-(bx.r-bx.x)*z)/2,(150-(bx.d-bx.y)*z)/2);q.scale(z,z);q.translate(-bx.x,-bx.y);
+  /* 只画与窗口相交的元素/形状（窗口外的一定不可见）。
+     相交测试放在「世界坐标」下做，与缩放无关；裁剪是纯保守的（宁多勿漏），
+     不会改变窗口内的绘制结果。 */
+  const hit=(e,m)=>{const mm=m||0;return e&&(e.x+(e.w||8)>=bx.x-mm&&e.x<=bx.r+mm&&e.y+(e.h||8)>=bx.y-mm&&e.y<=bx.d+mm);};
   /* 缩略图只有 340x150（实际显示约 226x128），因此背景走「临时渲染通道」：
-     共享一块小画布、按 z（真实缩放 0.17~0.34）× 2 倍过采样降采样、
-     每格最多覆盖 2.5 画布像素、不写持久缓存。
+     共享一块小画布、过采样、每格最多覆盖若干画布像素、不写持久缓存。
      此前直接走正常路径：每个形状都按真实尺寸（最大 3150x1432）独立占一块
-     离屏画布且永不释放 → 启动被阻塞近 90 秒、4K 下直接崩渲染进程。 */
-  if(typeof _bgEphBegin==='function')_bgEphBegin(1024,40000,z,2,2.5);
+     离屏画布且永不释放 → 启动被阻塞近 90 秒、4K 下直接崩渲染进程。
+     参数经 _budgetsweep2.cjs 扫描取"性价比拐点"：50 关背景耗时
+     24.9s → 1.39s（约 18 倍），而缩略图实际显示尺寸远小于此预算，
+     画质无可见损失。 */
+  if(typeof _bgEphBegin==='function')_bgEphBegin(256,2500,z,1,4);
   try{
-    for(const bg of lv.backgrounds.slice().sort((a,b2)=>(a.layer||0)-(b2.layer||0)))for(const s of bg.shapes||[])try{drawBgShape(q,s,s.x,s.y,s.w,s.h,s.alpha==null?.8:s.alpha,0,false,true,[],z);}catch(e){}
+    for(const bg of lv.backgrounds.slice().sort((a,b2)=>(a.layer||0)-(b2.layer||0)))for(const s of bg.shapes||[]){if(!hit(s,60))continue;try{drawBgShape(q,s,s.x,s.y,s.w,s.h,s.alpha==null?.8:s.alpha,0,false,true,[],z);}catch(e){}}
   }finally{if(typeof _bgEphEnd==='function')_bgEphEnd();}
-  for(const e of lv.elements){const a=getAdjacency(e,lv.elements);switch(e.type){case'platform':drawPlatformTo(q,e,a);break;case'ice':drawIceTo(q,e,a);break;case'movable':drawMovableTo(q,e,a);break;case'breakable':drawBreakableTo(q,e,a);break;case'flammable':drawFlammableTo(q,e,a);break;case'water':drawWaterTo(q,e,false);break;case'goal':drawGoalPortalShader(q,e,0);break;case'trophy':drawTrophyTo(q,e);break;case'switchDoor':drawSwitchDoorTo(q,e,false);break;case'switch':drawSwitchTo(q,e,false);break;case'gravityFlip':drawGravityZoneShader(q,e,0);break;case'door':q.fillStyle='#c19748';q.fillRect(e.x,e.y,e.w,e.h);break;case'spike':case'fallingSpike':q.fillStyle='#cf4e65';q.beginPath();q.moveTo(e.x,e.y+e.h);q.lineTo(e.x+e.w/2,e.y);q.lineTo(e.x+e.w,e.y+e.h);q.fill();break;case'spawn':q.fillStyle='#6affa9';q.fillRect(e.x,e.y-8,8,8);break;case'flagPickup':q.fillStyle='#edce61';q.fillRect(e.x,e.y,6,4);break;case'heart':q.fillStyle='#e46376';q.fillRect(e.x,e.y,7,6);break;case'laserRight':case'laserLeft':case'laserUp':case'laserDown':q.fillStyle='#ff4d6a';q.fillRect(e.x,e.y,7,7);break;case'disappear':q.fillStyle='rgba(190,170,255,.75)';q.fillRect(e.x,e.y,Math.max(6,e.w),Math.max(4,e.h));break;}}
+  for(const e of lv.elements){if(e.type!=='bg'&&!hit(e,40))continue;const a=getAdjacency(e,lv.elements);switch(e.type){case'platform':drawPlatformTo(q,e,a);break;case'ice':drawIceTo(q,e,a);break;case'movable':drawMovableTo(q,e,a);break;case'breakable':drawBreakableTo(q,e,a);break;case'flammable':drawFlammableTo(q,e,a);break;case'water':drawWaterTo(q,e,false);break;case'goal':drawGoalPortalShader(q,e,0);break;case'trophy':drawTrophyTo(q,e);break;case'switchDoor':drawSwitchDoorTo(q,e,false);break;case'switch':drawSwitchTo(q,e,false);break;case'gravityFlip':drawGravityZoneShader(q,e,0);break;case'door':q.fillStyle='#c19748';q.fillRect(e.x,e.y,e.w,e.h);break;case'spike':case'fallingSpike':q.fillStyle='#cf4e65';q.beginPath();q.moveTo(e.x,e.y+e.h);q.lineTo(e.x+e.w/2,e.y);q.lineTo(e.x+e.w,e.y+e.h);q.fill();break;case'spawn':q.fillStyle='#6affa9';q.fillRect(e.x,e.y-8,8,8);break;case'flagPickup':q.fillStyle='#edce61';q.fillRect(e.x,e.y,6,4);break;case'heart':q.fillStyle='#e46376';q.fillRect(e.x,e.y,7,6);break;case'laserRight':case'laserLeft':case'laserUp':case'laserDown':q.fillStyle='#ff4d6a';q.fillRect(e.x,e.y,7,7);break;case'disappear':q.fillStyle='rgba(190,170,255,.75)';q.fillRect(e.x,e.y,Math.max(6,e.w),Math.max(4,e.h));break;}}
   q.restore();return c;}
 function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/3)-1));Game.ready=true;screenKey='';}
 ['playScreen','playCanvas','playCanvasWrap','playInfo','playWin','playControls'].forEach(k=>D[k]=document.getElementById(k));
