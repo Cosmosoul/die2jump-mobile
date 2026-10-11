@@ -1335,7 +1335,10 @@
     if (MU.landscape) { MU.landscapeOverlay(); syncAccess(); return; }
 
     if (Game.state !== 'playing') sky();
-    if (['pause', 'win', 'fail'].includes(Game.state)) rect(0, 0, W, H, 'rgba(24,40,58,0.46)');
+    if (['pause', 'win', 'fail'].includes(Game.state)) rect(0, 0, W, H, 'rgba(10,16,30,0.34)');
+    /* WS-B v2 同步：局外整屏统一暗域（与 PC 同一套 SCRIM / scrim()），
+       让亮天空退为氛围底、文字与卡片自然浮现。局内（playing）不加。 */
+    if (Game.state !== 'playing' && typeof scrim === 'function') scrim(Game.state);
     switch (Game.state) {
       case 'boot': boot(); break;
       case 'menu': menu(); break;
@@ -1367,6 +1370,8 @@
     if (Game.transition > 0) {
       g.save(); g.globalAlpha = Game.transition * 0.22; rect(0, 0, W, H, '#ffffff'); g.restore();
     }
+    /* WS-B 同步：hover 进度图的清理必须在整帧绘制结束后做（game.js 的 rollButtons） */
+    if (typeof rollButtons === 'function') rollButtons();
     syncAccess();
   };
 
@@ -1388,45 +1393,43 @@
 
   /* ---------------------------------------------------------------- 天空背景 */
   /* 原版把 480×300 天空插画直接拉伸到全屏，竖屏会被压扁。
-     改为“等比放大 + 水平偏右裁切”，既能填满又保留太阳与光束构图。 */
+     改为“等比放大 + 水平偏右裁切”，既能填满又保留天际线构图。
+     WS-B v4：**不再自己写一遍着色**，改为直接复用 game.js 的 `_composeScene(t)` ——
+     手机版以前是手抄一份 sky()，结果每次改电脑版背景都忘了同步，导致两版色系漂移。
+     现在合成为共享函数，手机版只负责"怎么贴"（竖屏缩放 + 暗角补偿）。 */
   sky = function () {
-    if (!_skyBaked) _bakeSky();
-    const t = clock;
-    sg.setTransform(1, 0, 0, 1, 0, 0); sg.clearRect(0, 0, 480, 300);
-    sg.drawImage(_skyBG, 0, 0);
-    for (let i = 0; i < 9; i++) {
-      const x = ((i * 97 + t * (1.1 + (i % 4) * 0.75)) % 640) - 140;
-      const y = 20 + (i % 4) * 32, w = 92 + (i % 3) * 48, h = 36 + (i % 2) * 14;
-      const sp = _cloudSprite(w, h);
-      sg.drawImage(sp, Math.round(x - sp._ox), Math.round(y - sp._oy));
-    }
-    sg.drawImage(_skyTerrain, 0, 0);
-    const center = (Math.sin(t * 0.055) * 0.5 + 0.5) * 700 - 110;
-    for (let x = 0; x < 480; x += 3) {
-      const d = (x - center) / 115, beam = Math.exp(-(d * d));
-      if (beam < 0.004) continue;
-      sg.fillStyle = 'rgba(255,250,214,' + (beam * 0.30).toFixed(3) + ')';
-      sg.fillRect(x, 0, 3, 300);
-    }
-    sg.save(); sg.globalCompositeOperation = 'screen';
-    sg.beginPath(); sg.moveTo(384, 0); sg.lineTo(424, 0);
-    sg.lineTo(206 + Math.sin(t * 0.07) * 36, 300); sg.lineTo(60 + Math.sin(t * 0.07) * 36, 300);
-    sg.fillStyle = 'rgba(255,244,196,0.15)'; sg.fill();
-    sg.beginPath(); sg.moveTo(292, 0); sg.lineTo(318, 0);
-    sg.lineTo(116 + Math.sin(t * 0.05) * 26, 300); sg.lineTo(14 + Math.sin(t * 0.05) * 26, 300);
-    sg.fillStyle = 'rgba(255,232,168,0.10)'; sg.fill();
-    sg.restore();
-    sg.drawImage(_skyVig, 0, 0);
-
+    if (typeof _composeScene === 'function') _composeScene(clock);
+    else { if (!_skyBaked) _bakeSky(); sg.setTransform(1, 0, 0, 1, 0, 0); sg.clearRect(0, 0, 480, 300);
+           sg.drawImage(_skyBG, 0, 0); sg.drawImage(_skyVig, 0, 0); }
+    /* 竖屏把 480×300 放大到 ~3 倍：夜空是大面积平滑渐变，
+       此时必须开抗锯齿，否则会出现一条条色阶带（像素块本身不经过这里，不受影响）。 */
     const sc = Math.max(W / 480, H / 300);
     const dw = 480 * sc, dh = 300 * sc;
-    g.imageSmoothingEnabled = false;
+    g.imageSmoothingEnabled = true;
     g.drawImage(sceneCanvas, (W - dw) * 0.72, (H - dh) / 2, dw, dh);
+    /* 竖屏补偿：480×300 的烘焙暗角在放大后已跑出屏幕，画面会发"平"。
+       这里按竖屏比例补一层顶/底压深（暗紫色调，与赛博夜景同色系）。 */
+    const vg = g.createLinearGradient(0, 0, 0, H);
+    vg.addColorStop(0, 'rgba(6,3,16,0.48)');
+    vg.addColorStop(0.30, 'rgba(10,5,24,0.10)');
+    vg.addColorStop(0.62, 'rgba(10,5,24,0.06)');
+    vg.addColorStop(1, 'rgba(5,2,14,0.36)');
+    g.fillStyle = vg; g.fillRect(0, 0, W, H);
+    g.imageSmoothingEnabled = false;
   };
 
   /* ------------------------------------------------------------ 起始 / 菜单 */
   boot = function () {
-    /* 简约独立游戏启动页（竖屏）：居中 logo + 标语 + 呼吸提示，其余留白。 */
+    /* WS-B 同步：竖屏复用 game.js 的开机时间线（bootProgress/bootCommon），
+       只把「提示文案/位置」和「版本号位置」换成手机版口径，避免两套源码漂移。 */
+    if (typeof bootProgress === 'function' && typeof bootCommon === 'function') {
+      bootCommon(bootProgress(), H * 0.38, W / 2, H, {
+        hint: '轻 触 屏 幕 开 始', hintY: H * 0.78,
+        version: '手机版 · 竖屏触屏操作', versionCenter: true, versionY: H * 0.88
+      });
+      return;
+    }
+    /* 兜底：万一 game.js 未就绪，保持旧的静态版式 */
     const cy = H * 0.38;
     styledText('拼 死 跳 跃', W / 2, cy - H * 0.028, 2.10,
       ['#ffffff', '#ffe98a', '#e8a92c', '#96630e'], 3.6, 0.25);
@@ -1440,25 +1443,26 @@
     styledText('轻 触 屏 幕 开 始', W / 2, H * 0.78, 1.35,
       ['#ffffff', '#fff2b0', '#f0b73e', '#a9770f'], 2.2, 0.25);
     g.restore();
-    g.save(); g.globalAlpha = 0.42;
-    text('手机版 · 竖屏触屏操作', W / 2, H * 0.88, C.skyInkDim, 0.92);
-    g.restore();
   };
 
   menu = function () {
-    titleBlock(W / 2, H * 0.15, 1.26);
+    /* WS-B 同步：竖屏也加浮尘，与 PC 局外保持同一“空气感”（该函数来自 game.js） */
+    if (typeof skyMotes === 'function') skyMotes();
+    titleBlock(W / 2, H * 0.145, 1.34);
     const items = [
       ['chooseLevels', '选择关卡', 'flag', function () { change('levels'); }, true],
       ['settings', '设置', 'gear', function () { change('settings'); }, false],
       ['help', '游戏说明', 'book', function () { change('help'); }, false],
       ['exit', '退出游戏', 'exit', function () { change('exitConfirm'); }, false]];
-    const bw = Math.min(430, W - 56), bh = 68, step = bh + 18;
-    const y0 = Math.round(H * 0.30);
+    /* WS-B v2 同步：竖屏同样改为**裸文字版式**（无按钮底板），
+       与 PC 及参考的六款游戏保持一致；触屏点击区仍占满整行宽度便于命中。 */
+    const bw = Math.min(430, W - 56), bh = 86, step = bh + 20;
+    const y0 = Math.round(H * 0.275);
     for (let j = 0; j < items.length; j++) {
       const it = items[j];
-      button(it[0], it[1], (W - bw) / 2, y0 + j * step, bw, bh, it[3], { primary: it[4], icon: it[2] });
+      button(it[0], it[1], (W - bw) / 2, y0 + j * step, bw, bh, it[3], { plain: true, big: true });
     }
-    text('手机版 · 双拇指操作', W / 2, H * 0.93, C.skyInkDim, 1.05);
+    text('手机版 · 双拇指操作', W / 2, H * 0.945, C.inkFaint, 1.02);
   };
 
   header = function (title, sub) {
@@ -1469,7 +1473,19 @@
 
   /* ------------------------------------------------------------ 选关（竖排） */
   levels = function () {
-    const all = Game.levels.flatMap(r => r.lv.elements.filter(e => e.type === 'trophy').map(e => r.key + '::' + e.id));
+    if (typeof skyMotes === 'function') skyMotes();
+    /* ★奖杯统计绝不能遍历 r.lv.elements★（手机端选关卡顿的真正元凶）
+       程序化关卡下 `r.lv` 是**懒展开 getter**：为了一行“已收集/总数”，
+       旧版遍历全部 `Game.levels` 的 `r.lv.elements` ⇒ 一次性展开 **1000 关**
+       （每关含约 90KB 背景形状）⇒ 实测主线程被独占 **3953ms**。
+       展开结果还会把有界 LRU（64 关）反复冲垮，拖垮后续所有访问。
+       修法与 PC 版一致：直接用配方里**预存**的 `trophyIds`（打包时算好），
+       零展开即可得到总数。只有旧格式关卡（没有 trophyIds）才退回读 r.lv。 */
+    const all = Game.levels.flatMap(r => {
+      const ids = r.trophyIds != null ? r.trophyIds
+        : (r.lv && r.lv.elements ? r.lv.elements.filter(e => e.type === 'trophy').map(e => e.id) : []);
+      return ids.map(id => r.key + '::' + id);
+    });
     const taken = all.filter(k => Game.save.trophies[k]).length;
     header('选择关卡', '');
     trophyPlate(W - 24, 88, taken, all.length);
@@ -1478,6 +1494,12 @@
     const footH = 96;
     let per = Math.floor((H - listTop - footH) / stepR);
     per = Math.max(2, Math.min(6, per));
+    /* ★把预热窗口对齐到手机竖排的实际行数★
+       PC 的 schedulePreviewPrewarm 用 colsPerRow()（横向列数，通常 3），
+       而手机每页行数由竖屏高度算出（此处 2~6）。不对齐的话预热算的是"别的页"，
+       当前页缩略图仍会在绘制时同步现算 ⇒ 首屏/翻页出现百 ms 级长任务。 */
+    if (typeof alignPreviewPrewarm === 'function') alignPreviewPrewarm(per);
+    Game._mobileLevelsPer = per;   /* 供性能验收读取（手机竖排的真实每页行数） */
     const pages = Math.max(1, Math.ceil(Game.levels.length / per));
     Game.page = Math.max(0, Math.min(Game.page, pages - 1));
     const start = Game.page * per;
@@ -1495,37 +1517,54 @@
       button('level-' + i, '', rx, ry, rw, rowH, function () { begin(i); }, { disabled: !on });
 
       const tx = rx + 16, ty = ry + 17, tw = Math.round(rw * 0.34), th = rowH - 34;
-      rect(tx, ty, tw, th, '#ffffff');
-      if (r.preview) {
+      rect(tx, ty, tw, th, C.well);
+      /* ★用 peekPreview（只读缓存）而不是 r.preview★
+         r.preview 是 getter，未命中会**同步现算**（手机单张约 12ms、一页 6 张
+         74ms ⇒ 超过 50ms 长任务阈值）。这里改为只读缓存：命中就直接画，
+         未命中留空槽，后台预热补好后下一帧自动出现（局外逐帧重绘，pop-in 无感）。 */
+      const pv = (typeof peekPreview === 'function') ? peekPreview(r) : r.preview;
+      if (pv) {
+        /* === 缩略图不再拉伸（同 PC 版修复） ===
+           preview 画布是 340×150（比例 2.267），而这里的目标框是 tw×th（约 1.3）。
+           旧版直接 drawImage(preview,tx,ty,tw,th) ⇒ 纵向被拉长约 1.7 倍，关卡场景变形。
+           改为 **cover 语义**：按"填满目标框"的倍数等比缩放，多出的部分由外层 clip 裁掉，
+           既不拉伸也不留空。 */
+        const k = Math.max(tw / 340, th / 150), dw = 340 * k, dh = 150 * k;
         g.save(); g.beginPath(); g.rect(tx, ty, tw, th); g.clip();
         g.imageSmoothingEnabled = false;
-        g.drawImage(r.preview, tx, ty, tw, th); g.restore();
+        g.drawImage(pv, tx + (tw - dw) / 2, ty + (th - dh) / 2, dw, dh); g.restore();
       }
-      if (!on) { rect(tx, ty, tw, th, 'rgba(247,239,215,0.74)'); icon('lock', tx + tw / 2, ty + th / 2, 2.6); }
-      rect(tx, ty, tw, 1, '#ffffffcc'); rect(tx, ty + th - 1, tw, 1, '#00000033');
+      if (!on) { rrect(tx, ty, tw, th, 6, 'rgba(6,9,18,0.74)'); icon('lock', tx + tw / 2, ty + th / 2, 2.7); }
 
-      const cx = tx + tw + 22;
-      textLeft(String(i + 1).padStart(2, '0'), cx, ry + 42, on ? C.ink : C.inkFaint, 1.6);
-      textLeft(r.lv.name, cx + 32, ry + 42, on ? C.ink : C.inkFaint, 1.5);
-      textLeft('最快时间', cx, ry + 80, C.inkSoft, 1.15);
-      textLeft(formatTime(Game.save.best[r.key]), cx + 74, ry + 80,
-        Number.isFinite(Game.save.best[r.key]) ? C.ink : C.inkFaint, 1.25);
+      /* 文字区：建立字号层级（关号 1.30 金色 < 关卡名 1.66 主色 < 数值 1.40 金）；
+         并把「最快时间」与数值用**实测文字宽度**定位，避免两者粘连成一坨（旧版固定 +74 就有这个毛病）。 */
+      const cx = tx + tw + 20;
+      const nameY = ry + 40, dataY = ry + 78;
+      textLeft(String(i + 1).padStart(2, '0'), cx, nameY - 22, on ? C.goldHi : C.inkFaint, 1.30);
+      textLeft(r.lv.name, cx, nameY, on ? C.ink : C.inkFaint, 1.66, 1, 'rgba(5,3,14,0.70)');
+      const lbW = textW('最快时间', 1.18);
+      textLeft('最快时间', cx, dataY, C.inkFaint, 1.18);
+      textLeft(formatTime(Game.save.best[r.key]), cx + lbW + 18, dataY,
+        Number.isFinite(Game.save.best[r.key]) ? C.goldHi : C.inkSoft, 1.40);
 
-      const chipW = 116, chipX = rx + rw - chipW - 16, chipY = ry + rowH / 2 - 24;
+      const chipW = 108, chipX = rx + rw - chipW - 16, chipY = ry + rowH / 2 - 25;
       if (on) {
-        panel(chipX, chipY, chipW, 48, { tone: 'gold' });
-        text('进入', chipX + chipW / 2, chipY + 24, C.ink, 1.4);
+        panel(chipX, chipY, chipW, 50, { tone: 'gold' });
+        text('进入', chipX + chipW / 2, chipY + 25, C.ink, 1.50);
       } else {
-        panel(chipX, chipY, chipW, 48);
-        text('未解锁', chipX + chipW / 2, chipY + 24, C.inkFaint, 1.2);
+        text('未解锁', chipX + chipW / 2, chipY + 25, C.inkFaint, 1.28);
       }
     }
     if (pages > 1) {
       const by = H - 74;
-      button('pagePrev', '◀', W / 2 - 200, by, 76, 52, function () { Game.page--; }, { disabled: Game.page === 0 });
+      const gotoPage = function (d) {
+        Game.page = Math.max(0, Math.min(pages - 1, Game.page + d));
+        if (typeof alignPreviewPrewarm === 'function') alignPreviewPrewarm(per);
+      };
+      button('pagePrev', '◀', W / 2 - 200, by, 76, 52, function () { gotoPage(-1); }, { disabled: Game.page === 0 });
       panel(W / 2 - 110, by, 220, 52);
-      text('第 ' + (Game.page + 1) + ' / ' + pages + ' 页', W / 2, by + 26, C.ink, 1.3);
-      button('pageNext', '▶', W / 2 + 124, by, 76, 52, function () { Game.page++; }, { disabled: Game.page >= pages - 1 });
+      text('第 ' + (Game.page + 1) + ' / ' + pages + ' 页', W / 2, by + 26, C.inkSoft, 1.36);
+      button('pageNext', '▶', W / 2 + 124, by, 76, 52, function () { gotoPage(1); }, { disabled: Game.page >= pages - 1 });
     }
   };
 
@@ -1538,8 +1577,9 @@
     const x = (W - pw) / 2;
     const y = paused ? Math.max(120, (H - ph) / 2) : Math.round(H * 0.20);
     panel(x, y, pw, ph);
-    text(paused ? '已暂停' : '声音与存档', W / 2, y + 42, C.ink, 1.85);
-    rect(x + 28, y + 68, pw - 56, 2, '#cbbf9e');
+    text(paused ? '已暂停' : '声音与存档', W / 2, y + 44, C.ink, 1.95);
+    /* 分隔线改为一道极淡暖金（WS-B v2：去掉旧版米色硬线） */
+    rect(x + pw * 0.30, y + 72, pw * 0.40, 1, 'rgba(240,187,74,0.28)');
 
     const sx = x + 104, sw = Math.max(130, pw - 322);
     icon('sound', x + 42, y + 130, 1.35);
@@ -1570,7 +1610,7 @@
     const bw = (pw - 56) / 2;
     button('helpKeys', '触屏按键', x + 20, y + 20, bw, 50, function () { Game.tab = 0; }, { primary: Game.tab === 0 });
     button('helpRules', '玩法说明', x + 36 + bw, y + 20, bw, 50, function () { Game.tab = 1; }, { primary: Game.tab === 1 });
-    rect(x + 20, y + 84, pw - 40, 2, '#cbbf9e');
+    rect(x + 20, y + 84, pw - 40, 1, 'rgba(240,187,74,0.20)');
 
     if (!Game.tab) {
       /* 触屏键位：用与掌机同源的圆形键示意 + 说明，替代电脑版键盘键帽 */
@@ -1606,8 +1646,8 @@
       const step = Math.min(38, (ph - headH - 8) / lines.length);
       for (let i = 0; i < lines.length; i++) {
         const ly = y + headH + 4 + i * step;
-        rect(x + 34, ly - 6, 7, 7, C.gold); rect(x + 36, ly - 4, 3, 3, '#fff4c4');
-        textLeft(lines[i], x + 54, ly, C.ink, 1.26);
+        rect(x + 34, ly - 6, 6, 6, C.gold); rect(x + 36, ly - 4, 2, 2, '#fff4c4');
+        textLeft(lines[i], x + 54, ly, C.ink, 1.30);
       }
     }
   };
@@ -1645,8 +1685,7 @@
     panel(x, y, pw, ph);
     if (win) icon('trophy', W / 2, y + 62, 2.6);
     else heart(W / 2 - 14, y + 50, 2.4, C.red, 4);
-    styledText(win ? '关 卡 完 成' : '生 命 耗 尽', W / 2, y + 138, 1.66,
-      win ? ['#ffffff', '#ffe98a', '#e8a92c', '#96630e'] : ['#fff0f0', '#ff8f96', '#d4384a', '#8e1d28'], 3.0, 0.25);
+    text(win ? '关 卡 完 成' : '生 命 耗 尽', W / 2, y + 138, win ? C.goldHi : '#ff9aa5', 1.86);
     if (win) {
       text(formatTime(Game.elapsed), W / 2, y + 198, C.ink, 1.9);
       panel(W / 2 - 160, y + 232, 320, 48, { tone: Game.newBest ? 'gold' : 'paper' });

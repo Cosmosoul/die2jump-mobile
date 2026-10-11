@@ -78,8 +78,27 @@
   var currentGenre = '';
 
   var musicCache = {};         // key -> AudioBuffer
+  var musicCacheBytes = {};    // key -> 占用字节（精确记账，用于内存预算淘汰）
   var musicCacheOrder = [];    // LRU 顺序
-  var MUSIC_CACHE_MAX = 8;
+  /* === 缓存上限：从「条数」改为「内存预算」（支撑大规模地图） ===
+     旧实现把上限设成 `关卡数 + 2`（prewarm 里会往上抬），这在 20 关时没问题，
+     但本地批量生成关卡（实测放大到 400 关）时会变成：
+       402 轨 × 15.8MB/轨（实测 DUR 46.8s × 44.1kHz × 2ch × 4B）≈ **6.3 GB**
+     ⇒ 必然 OOM 崩溃。
+     现在改为**内存预算**驱动：
+       · MUSIC_CACHE_BYTES 是硬上限（默认 192MB，约 12 轨）；
+       · 每条 buffer 按 `length × numberOfChannels × 4` 精确记账；
+       · 淘汰时**永不驱逐「当前正在播放」与「菜单/暂停」这两条常驻轨**
+         （否则会出现"音乐播到一半被自己踢掉"的诡异现象）；
+       · 条数上限只作为兜底（防止极短曲目把 map 撑爆）。 */
+  var MUSIC_CACHE_MAX = 24;                 /* 条数兜底 */
+  var MUSIC_CACHE_BYTES = 192 * 1024 * 1024;/* 内存硬上限 192MB */
+  var _cacheBytes = 0;
+  var _cachePinned = {};                    /* 常驻：kind -> true（menu/pause） */
+  function _bufBytes(buf) {
+    if (!buf) return 0;
+    return (buf.length || 0) * (buf.numberOfChannels || 1) * 4;
+  }
 
   var sfxCache = {};           // name -> AudioBuffer
   var sfxActive = new Set();   // 正在播放的一次性音效源
@@ -352,6 +371,22 @@
       kickPool: ['9.......9.......', '9.......7.......'], snarePool: ['........6.......', '........x.......'],
       hatPool: ['..x...x...x...x.', '....x.......x...'], padPool: [0.08, 0.12],
       progs: [[0, 4, 3, 0], [0, 0, 3, 4], [3, 4, 0, 0]]
+    },
+    /* ★BOSS 主题★（用户原话「华丽一点炫酷一点有压迫感一点」）
+       · tempo 拉高到 148 + drive 0.95 ⇒ 推进感与失真的压迫；
+       · density 0.86 + 双倍结构（见 compose 的 BOSS 分支）⇒ 织体最厚；
+       · 沉重四四拍：底鼓落在 1、3 拍与切分的"3&"上（半速感觉 + 双踩）；
+       · 军鼓加密成十六分滚奏 ⇒ 华丽/炫酷；
+       · 进行 i–VI–VII–V（谐波小调里的"魔王进行"）—— 最典型的压迫感和声。
+       · 音阶只取 minor / 和声色彩近亲，保证"阴沉"是确定的，不靠随机漂。 */
+    bossTheme: {
+      name: '魔域', tempo: 148, scalePool: ['minor', 'dorian'], swingPool: [0, 0],
+      leadPool: ['saw', 'square'], bassPool: ['saw', 'square'], drive: 0.95, density: 0.86,
+      kickPool: ['9...9...9...9...', '9.....9.9.....9.', '9...9...9...9.9.'],
+      snarePool: ['..x.x.x...x.x.x.', '..x...x...x...x.', '.x.x.x.x.x.x.x.x'],
+      hatPool: ['xxxxxxxxxxxxxxxx', 'x.xxx.xxx.xxx.xx'],
+      padPool: [0.16, 0.20, 0.24],
+      progs: [[0, 5, 6, 4], [0, 5, 6, 4], [0, 6, 5, 4]]
     }
   };
   var STYLE_KEYS = Object.keys(STYLES);
@@ -424,15 +459,19 @@
     var seedStr, seedNum;
     if (kind === 'menu') { seedStr = 'MENU_V4'; seedNum = hashStr(seedStr, 0x1234abcd); }
     else if (kind === 'pause') { seedStr = 'PAUSE_V4'; seedNum = hashStr(seedStr, 0x77aa33cc); }
+    else if (kind === 'boss') { seedStr = 'BOSS_THEME_V1'; seedNum = hashStr(seedStr, 0x5bd1e995); }
     else { seedStr = levelSeed(level); seedNum = hashStr(seedStr, 0x2545f491); }
 
     var rng = mulberry32(seedNum);
-    var F = (kind === 'level') ? deriveMusicFeatures(level) : { energy: 0.4, hazard: 0.1, bright: 0.5, roomy: 0.4, bars: 16, count: 20 };
+    var F = (kind === 'level') ? deriveMusicFeatures(level)
+      : (kind === 'boss') ? { energy: 0.95, hazard: 0.9, bright: 0.22, roomy: 0.30, bars: 16, count: 20 }
+        : { energy: 0.4, hazard: 0.1, bright: 0.5, roomy: 0.4, bars: 16, count: 20 };
 
     var gkey, G;
     if (level && level.__forceStyle && STYLES[level.__forceStyle]) gkey = level.__forceStyle;   /* 仅测试用覆盖 */
     else if (kind === 'menu') gkey = 'jazz';
     else if (kind === 'pause') gkey = 'classical';
+    else if (kind === 'boss') gkey = 'bossTheme';        /* ★BOSS 主题固定风格★ */
     else gkey = STYLE_KEYS[Math.floor(rng() * STYLE_KEYS.length)];
     G = STYLES[gkey];
 
@@ -440,6 +479,9 @@
     var BPM = clamp(Math.round(G.tempo + (rng() * 2 - 1) * 7 + energyBias), 64, 150);
 
     var BARS = F.bars;
+    /* ★BOSS：结构加长到 2 倍★（F.bars 由关卡特征算出，BOSS 场景没有关卡 ⇒ 走默认 16）
+       翻倍到 32 小节 ⇒ 循环周期更长、听不出重复，才撑得住一场拉锯战。 */
+    if (kind === 'boss') BARS = BARS * 2;
     var BEAT = 60 / BPM, BAR = BEAT * 4, SIX = BEAT / 4, DUR = BAR * BARS;
     var swing = pickFrom(rng, G.swingPool);
 
@@ -1007,10 +1049,36 @@
     var idx = musicCacheOrder.indexOf(key);
     if (idx >= 0) { musicCacheOrder.splice(idx, 1); musicCacheOrder.push(key); }
   }
+  /* 记一笔内存（入缓存时调用） */
+  function _noteBytes(key, buf) {
+    var b = _bufBytes(buf);
+    if (b) { musicCacheBytes[key] = b; _cacheBytes += b; }
+  }
+  function _dropKey(k) {
+    if (musicCacheBytes[k]) { _cacheBytes -= musicCacheBytes[k]; delete musicCacheBytes[k]; }
+    delete musicCache[k];
+  }
+  /* 淘汰：先按内存预算，再按条数兜底。
+     保护两类 key，绝不驱逐：
+       ① 正在播放的轨（activeTracks 里的）—— 否则音乐播到一半突然断；
+       ② 常驻轨（menu / pause）—— 它们必须"按下即响"，重建代价是 4 秒等待。
+     `_pinOf(key)` 从 key 前缀取 kind（key 形如 `kind|genre|seed`）。 */
+  function _pinOf(key) { return String(key).split('|')[0]; }
+  function _isProtected(key) {
+    if (_cachePinned[_pinOf(key)]) return true;
+    for (var i = 0; i < activeTracks.length; i++) {
+      if (activeTracks[i] && activeTracks[i].key === key) return true;
+    }
+    return false;
+  }
   function evictCache() {
-    while (musicCacheOrder.length > MUSIC_CACHE_MAX) {
+    /* 先从最旧的开始尝试驱逐，跳过受保护的（把它们挪到队尾重排） */
+    var guard = 0, limit = musicCacheOrder.length * 2 + 8;
+    while ((_cacheBytes > MUSIC_CACHE_BYTES || musicCacheOrder.length > MUSIC_CACHE_MAX) && guard++ < limit) {
       var k = musicCacheOrder.shift();
-      delete musicCache[k];
+      if (k === undefined) break;
+      if (_isProtected(k)) { musicCacheOrder.push(k); continue; }
+      _dropKey(k);
     }
   }
 
@@ -1019,7 +1087,7 @@
     var key = kind + '|' + (chart.genre || '') + '|' + chart.seed;
     if (musicCache[key]) { touchCache(key); return { buf: musicCache[key], chart: chart }; }
     var buf = synthesizeTrack(chart, kind);
-    if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); evictCache(); }
+    if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); _noteBytes(key, buf); evictCache(); }
     return { buf: buf, chart: chart };
   }
 
@@ -1050,7 +1118,7 @@
     var finished = synthJob, buf = finished.job.finish();
     synthJob = null;
     if (buf) {
-      musicCache[finished.key] = buf; musicCacheOrder.push(finished.key); evictCache();
+      musicCache[finished.key] = buf; musicCacheOrder.push(finished.key); _noteBytes(finished.key, buf); evictCache();
       /* ensureTrack 等待者：缓存就绪即 resolve */
       if (finished._resolve && pendingEnsure) { var pe = pendingEnsure; pendingEnsure = null; finished._resolve(finished); }
       /* 只有当场景未再变化、且确实需要这条轨时才起播 */
@@ -1141,7 +1209,7 @@
     var t = ctx.currentTime;
     try { src.start(t); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.6); }
     catch (e) { try { src.start(); } catch (e2) { } }
-    activeTracks.push({ src: src, gain: g });
+    activeTracks.push({ src: src, gain: g, key: trackKey(kind, chart) });
     currentSeed = chart.seed;
     currentDuration = chart.duration;
     currentGenre = chart.genre || '';
@@ -1165,7 +1233,10 @@
       return;
     }
     requestTrack(scene, sceneLevel);
-    if (scene !== 'level') stopAllAmbient(true);
+    /* ★BOSS 场景与 level 一样保留环境音★（水流/风声/虫鸣）——
+       进 BOSS 房时把环境音掐掉会让临场感断裂，听起来像"跳到另一首歌"。
+       只有 menu/pause 才停环境音。 */
+    if (scene !== 'level' && scene !== 'boss') stopAllAmbient(true);
   }
 
   /* ------------------------------------------------------------------ */
@@ -1197,6 +1268,54 @@
       prev += (w - prev) * lp;
       var tail = (n - i) < 40 ? (n - i) / 40 : 1;
       out[idx] += prev * amp * Math.exp(-t * (decay || 6)) * tail;
+    }
+  }
+
+  /* ★FM 合成（怪物音效的"高级音色"主力）★
+     为什么必须有它：本项目既有音效只有 sine/tri/saw/square 四个基波 ——
+     单层基波无论怎么包络都摆脱不了"8bit 味道"。FM（一个正弦调制另一个
+     正弦的瞬时相位）能用**两个参数**造出带丰富谐波又完全可控的音色：
+       · ratio=0.5~1.0 + index≈4~5  ⇒ 兽吼 / 铜管（低频厚重、有"嗓音感"）
+       · ratio=2.0~3.6 + index≈2~4  ⇒ 金属 / 骨骼（有明确的"硬物"泛音）
+       · ratio=5.0+     + index≈3    ⇒ 铃 / 玻璃（清亮但不刺耳）
+     调制指数按 `menv` 随时间衰减 ⇒ 起音粗粝、尾音收束（真实乐器的行为），
+     而不是全程一样粗糙。★不刺耳的硬约束★：调用方一律把 `f0/f1` 控制在
+     1.4kHz 以下、`index` ≤ 6，再交给 sfxTame（4.5kHz 以上 -6dB）兜底。 */
+  function p_fm(out, sr, t0, dur, f0, f1, amp, ratio, index, attack, decay) {
+    var i0 = Math.round(t0 * sr), n = Math.round(dur * sr);
+    var atk = Math.max(1, (attack || 0.005) * sr);
+    var ph = 0, mph = 0;
+    var dec = decay || 3;
+    for (var i = 0; i < n; i++) {
+      var idx = i0 + i; if (idx < 0) continue; if (idx >= out.length) break;
+      var t = i / sr, u = t / dur;
+      var f = f0 + (f1 - f0) * u;
+      mph += 2 * Math.PI * (f * ratio) / sr;
+      ph += 2 * Math.PI * f / sr;
+      var menv = Math.exp(-t * dec * 0.55);
+      var s = Math.sin(ph + Math.sin(mph) * index * menv);
+      var env = Math.min(1, i / atk) * Math.exp(-t * dec);
+      var tail = (n - i) < 40 ? (n - i) / 40 : 1;
+      out[idx] += s * amp * env * tail;
+    }
+  }
+
+  /* ★带通扫频噪声★（气流 / 蒸汽 / 呼啸 / 尘雾）
+     与 p_noise 的区别：一阶低通系数 `lp` 在整段里**从 lp0 线性扫到 lp1**。
+      · lp 0.02→0.30：由暗到亮 ⇒ 像"某物正在逼近/睁眼"（呼啸、睁眼）
+      · lp 0.50→0.03：由亮到暗 ⇒ 像"泄气/熄灭/远去"（蒸汽、扑灭、尘雾）
+     听起来是"一个有体积的声源在运动"，而不是一段静止的白噪底。 */
+  function p_noiseSweep(out, sr, t0, dur, amp, lp0, lp1, decay, rng, hp) {
+    var i0 = Math.round(t0 * sr), n = Math.round(dur * sr), y = 0, py = 0;
+    for (var i = 0; i < n; i++) {
+      var idx = i0 + i; if (idx < 0) continue; if (idx >= out.length) break;
+      var t = i / sr, u = t / dur;
+      var lp = lp0 + (lp1 - lp0) * u;
+      var w = rng() * 2 - 1;
+      y += (w - y) * lp;
+      var s = hp ? (y - py) : y; py = y;
+      var tail = (n - i) < 40 ? (n - i) / 40 : 1;
+      out[idx] += s * amp * Math.exp(-t * (decay || 6)) * tail;
     }
   }
 
@@ -1236,7 +1355,198 @@
     'uiHover': { dur: 0.08, gen: function (o, s, r) { p_tone(o, s, 0, 0.05, 1200, 1400, 0.18, 'sine', 0.002, 16); } },
     'uiClick': { dur: 0.11, gen: function (o, s, r) { p_tone(o, s, 0, 0.06, 880, 1320, 0.26, 'sine', 0.002, 18); p_tone(o, s, 0.03, 0.07, 1320, 1760, 0.16, 'tri', 0.002, 16); } },
     'win': { dur: 0.90, gen: function (o, s, r) { var n = [523, 659, 784, 1047]; for (var i = 0; i < n.length; i++) p_tone(o, s, i * 0.16, 0.36, n[i], n[i], 0.34, 'sine', 0.005, 3.5); } },
-    'fail': { dur: 0.70, gen: function (o, s, r) { p_tone(o, s, 0, 0.3, 440, 415, 0.35, 'sine', 0.006, 4); p_tone(o, s, 0.28, 0.4, 392, 370, 0.35, 'sine', 0.006, 3.5); } }
+    'fail': { dur: 0.70, gen: function (o, s, r) { p_tone(o, s, 0, 0.3, 440, 415, 0.35, 'sine', 0.006, 4); p_tone(o, s, 0.28, 0.4, 392, 370, 0.35, 'sine', 0.006, 3.5); } },
+
+    /* ==================================================================
+       ★怪物专属音效（v1）★
+       ------------------------------------------------------------------
+       用户原话（硬约束）：「所有怪物都要有专属音效 …… 所有音效记住不能刺耳
+       不能太低端不能只是简单的 8bit 音效，要适当你真复杂一点」。
+       因此这里的每一条都遵守三条纪律：
+         ① **多层**：至少 2 个声部（FM 主体 + 噪声/共鸣层），单层基波不用；
+         ② **不刺耳**：主频一律 ≤ 2.2kHz，粗粝感靠 FM 调制指数而非高频；
+            再有 sfxTame（4.5kHz 以上 -6dB）兜底 ⇒ 连点也不会扎耳朵；
+         ③ **有体积**：长度 ≥ 0.3s 的都会带"噪声扫频"层（气流感 / 空间感），
+            避免"啪一下就没了"的低端感。
+       命名与运行时触发点一一对应（见 runtime.js 里的 AudioSystem.sfx 调用）。
+       ================================================================== */
+
+    /* ---- 墓碑粉碎（小怪1 的触发器）----
+       石块：FM ratio 3.4 造"硬物"泛音；尘埃：低通扫频由亮转暗（扬尘沉降）。 */
+    'graveCrush': {
+      dur: 0.85, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.30, 220, 96, 0.50, 3.4, 4.2, 0.003, 5.5);      /* 石体断裂 */
+        p_fm(o, s, 0.05, 0.26, 148, 62, 0.38, 2.1, 5.0, 0.004, 6.0);    /* 低频塌陷 */
+        p_noiseSweep(o, s, 0, 0.55, 0.30, 0.46, 0.06, 4.2, r, false);   /* 尘雾：亮→暗 */
+        p_noise(o, s, 0, 0.10, 0.26, 0.60, 16, r);                      /* 起手的碎屑 */
+        p_tone(o, s, 0.36, 0.40, 92, 58, 0.18, 'sine', 0.01, 4);        /* 落地闷响 */
+      }
+    },
+
+    /* ---- 苍白鬼魂：从墓碑"钻"出来 ---- */
+    'foeGhostSpawn': {
+      dur: 1.05, vol: 0.9, gen: function (o, s, r) {
+        /* 由暗到亮的扫频噪声 = "有什么东西正在浮出来" */
+        p_noiseSweep(o, s, 0, 0.85, 0.30, 0.03, 0.26, 1.9, r, false);
+        /* 反向滑音（低→高）带出"升起"的姿态，用两个失谐层做合唱感 */
+        p_tone(o, s, 0.04, 0.80, 168, 268, 0.20, 'sine', 0.16, 1.6);
+        p_tone(o, s, 0.04, 0.80, 170, 271, 0.16, 'sine', 0.16, 1.6);
+        p_fm(o, s, 0.20, 0.60, 300, 420, 0.10, 1.5, 2.2, 0.12, 1.8);
+      }
+    },
+    /* ---- 苍白鬼魂：被"玩家幽灵"撞散（惊讶 + 化白雾）---- */
+    'foeGhostDie': {
+      dur: 0.75, vol: 0.9, gen: function (o, s, r) {
+        p_tone(o, s, 0, 0.42, 470, 700, 0.24, 'sine', 0.012, 4.5);      /* 上挑的"咦!"*/
+        p_tone(o, s, 0, 0.42, 474, 706, 0.20, 'sine', 0.012, 4.5);      /* 微失谐 = 惊愕 */
+        p_fm(o, s, 0.06, 0.34, 240, 130, 0.24, 2.6, 3.4, 0.004, 6);     /* 骸体解体 */
+        p_noiseSweep(o, s, 0.04, 0.60, 0.26, 0.44, 0.05, 4.0, r, false);/* 白雾扩散 */
+      }
+    },
+    /* ---- 苍白鬼魂：近距开火 ---- */
+    'foeGhostShot': {
+      dur: 0.34, vol: 0.8, gen: function (o, s, r) {
+        p_tone(o, s, 0, 0.16, 1080, 480, 0.26, 'sine', 0.003, 12);      /* 幽能喷出 */
+        p_fm(o, s, 0, 0.14, 620, 300, 0.20, 1.5, 3.0, 0.002, 13);
+        p_noise(o, s, 0, 0.20, 0.14, 0.34, 9, r);                       /* 一点气流尾 */
+      }
+    },
+
+    /* ---- 火团怪：从火焰里"弹"出来 ---- */
+    'foeFireSpawn': {
+      dur: 0.55, vol: 0.9, gen: function (o, s, r) {
+        p_noiseSweep(o, s, 0, 0.34, 0.38, 0.20, 0.62, 7.0, r, false);   /* 火焰被"挤"出来 */
+        p_tone(o, s, 0, 0.30, 380, 760, 0.22, 'tri', 0.008, 6.5);       /* 上跳弹起 */
+        p_fm(o, s, 0.02, 0.26, 210, 320, 0.20, 1.0, 3.6, 0.006, 8);     /* 爆燃质感 */
+      }
+    },
+    /* ---- 火团怪：被带水幽灵扑灭 ---- */
+    'foeFireDie': {
+      dur: 0.95, vol: 0.9, gen: function (o, s, r) {
+        p_noiseSweep(o, s, 0, 0.80, 0.40, 0.66, 0.03, 3.2, r, false);   /* 嘶——蒸汽泄压 */
+        p_noiseSweep(o, s, 0.02, 0.70, 0.22, 0.50, 0.05, 3.6, r, true); /* 高通薄层：水汽 */
+        p_tone(o, s, 0, 0.55, 300, 96, 0.26, 'sine', 0.01, 3.4);        /* 熄灭下行 */
+      }
+    },
+
+    /* ---- 骷髅怪：巡视时的骨响（轻、短、可频繁触发）---- */
+    'skelTick': {
+      dur: 0.22, vol: 0.55, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.10, 420, 300, 0.36, 3.6, 4.4, 0.001, 16);       /* 骨节轻磕 */
+        p_noise(o, s, 0, 0.05, 0.08, 0.55, 26, r);
+      }
+    },
+    /* ---- 骷髅怪：发现玩家（咔咔抬头 + 双状态机切换）---- */
+    'skelAlert': {
+      dur: 0.60, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.14, 300, 620, 0.36, 3.4, 5.0, 0.002, 11);       /* 咔 */
+        p_fm(o, s, 0.13, 0.14, 340, 700, 0.34, 3.4, 5.4, 0.002, 11);    /* 咔（上挑）*/
+        p_tone(o, s, 0.28, 0.28, 620, 940, 0.18, 'tri', 0.004, 7);      /* 喉音上挑 */
+      }
+    },
+    /* ---- 骷髅怪：蓄力（0.35s 后仰 → 冲刺）---- */
+    'skelCharge': {
+      dur: 0.45, gen: function (o, s, r) {
+        p_tone(o, s, 0, 0.36, 120, 300, 0.34, 'saw', 0.05, 4.2);        /* 蓄力上行 */
+        p_fm(o, s, 0, 0.36, 96, 220, 0.26, 1.5, 3.2, 0.06, 4.0);
+        p_noiseSweep(o, s, 0.04, 0.36, 0.16, 0.10, 0.34, 4.5, r, false);/* 能量聚拢 */
+      }
+    },
+    /* ---- 骷髅怪：冲刺 ---- */
+    'skelDash': {
+      dur: 0.42, gen: function (o, s, r) {
+        p_noiseSweep(o, s, 0, 0.34, 0.34, 0.34, 0.10, 5.0, r, false);   /* 划过空气 */
+        p_tone(o, s, 0, 0.26, 340, 150, 0.24, 'tri', 0.004, 7);         /* 骨头破风 */
+        p_fm(o, s, 0, 0.20, 260, 120, 0.20, 2.8, 3.6, 0.002, 9);
+      }
+    },
+    /* ---- 骷髅怪：眩晕（头顶转星星）---- */
+    'skelStun': {
+      dur: 0.80, gen: function (o, s, r) {
+        /* 打转的合金铃：FM ratio 5.2 造"清亮但不尖"的金属环 */
+        p_fm(o, s, 0, 0.34, 720, 600, 0.20, 5.2, 2.4, 0.01, 3.6);
+        p_fm(o, s, 0.14, 0.34, 640, 520, 0.17, 5.2, 2.4, 0.01, 3.6);
+        p_fm(o, s, 0.28, 0.36, 560, 440, 0.14, 5.2, 2.4, 0.01, 3.6);
+        p_tone(o, s, 0, 0.55, 150, 96, 0.16, 'sine', 0.02, 3);          /* 塌下来的闷底 */
+      }
+    },
+    /* ---- 骷髅怪：被玩家踩碎 ---- */
+    'skelDie': {
+      dur: 0.85, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.12, 780, 420, 0.34, 4.0, 4.6, 0.001, 13);       /* 头骨碎裂 */
+        p_noise(o, s, 0, 0.22, 0.30, 0.52, 8, r);
+        for (var i = 0; i < 4; i++)                                     /* 骨块四散落地 */
+          p_fm(o, s, 0.10 + i * 0.11, 0.12, 300 - i * 26, 200 - i * 22, 0.20, 3.4, 4.0, 0.001, 14);
+        p_tone(o, s, 0.42, 0.34, 110, 62, 0.20, 'sine', 0.008, 4.5);    /* 残骸落定 */
+      }
+    },
+
+    /* ---- BOSS：苏醒长吼（进门第一声，要有"地鸣 + 兽吼"两层）---- */
+    'bossAwake': {
+      dur: 2.30, vol: 0.95, gen: function (o, s, r) {
+        /* 地鸣：极低频、慢起、长衰减 —— 让"巨大感"从耳朵以下传上来 */
+        p_tone(o, s, 0, 1.90, 58, 36, 0.52, 'sine', 0.10, 1.5);
+        p_fm(o, s, 0.06, 1.60, 46, 30, 0.34, 1.0, 3.2, 0.16, 1.6);
+        /* 兽吼主体：FM ratio 0.62（次谐波，低而宽）的滑音，共振峰由低到高再回落 */
+        p_fm(o, s, 0.10, 1.55, 150, 178, 0.44, 0.62, 5.4, 0.14, 1.5);
+        p_fm(o, s, 0.10, 1.55, 151, 180, 0.34, 0.63, 5.8, 0.14, 1.5);   /* 失谐 → 厚度 */
+        p_fm(o, s, 0.42, 1.10, 176, 118, 0.28, 1.24, 4.4, 0.20, 1.9);   /* 吼腔的第二个共振峰 */
+        /* 气流：由暗到亮的扫频（"它张开了嘴"） */
+        p_noiseSweep(o, s, 0.04, 1.70, 0.26, 0.02, 0.20, 1.6, r, false);
+        /* 尾音：一声胸腔共鸣的收束，避免"声音被掐断" */
+        p_tone(o, s, 1.55, 0.70, 92, 62, 0.20, 'sine', 0.06, 2.6);
+      }
+    },
+    /* ---- BOSS：每波开始的咆哮（比苏醒短、更凶、带金属摩擦）---- */
+    'bossRoar': {
+      dur: 1.45, vol: 0.95, gen: function (o, s, r) {
+        p_tone(o, s, 0, 1.05, 74, 48, 0.44, 'sine', 0.05, 1.9);         /* 胸腔底 */
+        p_fm(o, s, 0, 0.95, 168, 138, 0.42, 0.66, 5.6, 0.06, 1.9);      /* 吼腔 */
+        p_fm(o, s, 0.02, 0.90, 252, 196, 0.28, 1.33, 4.2, 0.08, 2.2);   /* 上方共鸣峰 */
+        p_noiseSweep(o, s, 0.02, 0.90, 0.28, 0.05, 0.24, 2.4, r, false);/* 喷出的气 */
+        /* 金属刮擦：高通细层，给"威压"一点锋利的边，但只占很小比例 */
+        p_noise(o, s, 0.00, 0.26, 0.10, 0.62, 7, r);
+        p_fm(o, s, 0.66, 0.40, 210, 132, 0.22, 2.0, 4.6, 0.02, 4.0);    /* 收尾"咕噜" */
+      }
+    },
+    /* ---- BOSS：沉睡回落（气息变远、逐渐闭眼）---- */
+    'bossSleep': {
+      dur: 1.60, vol: 0.85, gen: function (o, s, r) {
+        p_fm(o, s, 0, 1.10, 140, 66, 0.34, 0.66, 4.6, 0.08, 2.0);
+        p_tone(o, s, 0, 1.30, 82, 44, 0.30, 'sine', 0.08, 1.8);
+        p_noiseSweep(o, s, 0, 1.20, 0.22, 0.22, 0.02, 2.2, r, false);   /* 亮→暗 = 远去 */
+        p_tone(o, s, 1.10, 0.42, 60, 40, 0.16, 'sine', 0.06, 3.2);
+      }
+    },
+    /* ---- BOSS：吐弹（喉音 + 喷气；可频繁触发 ⇒ 时长与音量都收着）---- */
+    'bossSpit': {
+      dur: 0.50, vol: 0.75, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.20, 190, 120, 0.30, 0.8, 4.6, 0.004, 9);        /* 喉音 */
+        p_noiseSweep(o, s, 0.02, 0.34, 0.24, 0.08, 0.46, 5.5, r, false);/* 喷出的气流 */
+        p_tone(o, s, 0.04, 0.22, 320, 200, 0.16, 'tri', 0.006, 8);
+      }
+    },
+    /* ---- BOSS：受爆伤害（"命中"而非"爆炸"，与玩家炸弹音区分开）---- */
+    'bossHit': {
+      dur: 0.70, vol: 0.95, gen: function (o, s, r) {
+        p_fm(o, s, 0, 0.26, 168, 60, 0.52, 1.2, 5.0, 0.002, 6.5);       /* 沉重的钝击 */
+        p_tone(o, s, 0, 0.44, 110, 42, 0.48, 'sine', 0.002, 4.2);
+        p_noise(o, s, 0, 0.16, 0.28, 0.42, 11, r);                      /* 皮开的碎响 */
+        p_fm(o, s, 0.14, 0.44, 130, 74, 0.24, 0.66, 4.2, 0.06, 3.4);    /* 痛的闷哼 */
+      }
+    },
+    /* ---- BOSS：死亡崩解（长、下行、哀嚎 → 尘埃落定）---- */
+    'bossDeath': {
+      dur: 2.80, vol: 0.95, gen: function (o, s, r) {
+        p_tone(o, s, 0, 1.30, 120, 40, 0.50, 'sine', 0.03, 1.4);        /* 崩解下行 */
+        p_fm(o, s, 0, 1.20, 200, 70, 0.42, 0.7, 5.6, 0.04, 1.5);        /* 哀嚎 */
+        p_fm(o, s, 0.04, 1.10, 300, 104, 0.26, 1.4, 4.6, 0.05, 1.7);
+        p_noiseSweep(o, s, 0.02, 1.70, 0.32, 0.52, 0.03, 2.0, r, false);/* 崩落的尘与渣 */
+        for (var i = 0; i < 5; i++)                                     /* 连续塌方 */
+          p_tone(o, s, 0.55 + i * 0.26, 0.30, 96 - i * 8, 48, 0.22, 'sine', 0.006, 5);
+        p_tone(o, s, 2.05, 0.65, 56, 33, 0.30, 'sine', 0.05, 2.2);      /* 最后的地鸣 */
+      }
+    }
   };
 
   /* 常见别名 */
@@ -1246,11 +1556,51 @@
     'fallingspike': 'fallingSpike', 'laserhit': 'laserHit', 'flagplace': 'flagPlace',
     'flagpull': 'flagPull', 'flagpickup': 'flagPickup', 'dooropen': 'doorOpen',
     'doorclose': 'doorClose', 'ui_hover': 'uiHover', 'ui_click': 'uiClick',
-    'uiclick': 'uiClick', 'uihover': 'uiHover', 'double_jump': 'doubleJump'
+    'uiclick': 'uiClick', 'uihover': 'uiHover', 'double_jump': 'doubleJump',
+    /* ★怪物 / BOSS 音效别名★（小写、下划线两种写法都归到同一个键，
+       与既有纪律一致：调用方写错大小写不会变成"静默无声"）。 */
+    'gravecrush': 'graveCrush', 'grave_crush': 'graveCrush',
+    'foeghostspawn': 'foeGhostSpawn', 'foe_ghost_spawn': 'foeGhostSpawn',
+    'ghostspawn': 'foeGhostSpawn', 'ghost_spawn': 'foeGhostSpawn',
+    'foeghostdie': 'foeGhostDie', 'foe_ghost_die': 'foeGhostDie',
+    'ghostdie': 'foeGhostDie', 'ghost_die': 'foeGhostDie',
+    'foeghostshot': 'foeGhostShot', 'foe_ghost_shot': 'foeGhostShot',
+    'ghostshot': 'foeGhostShot', 'ghost_shot': 'foeGhostShot',
+    'foefirespawn': 'foeFireSpawn', 'foe_fire_spawn': 'foeFireSpawn',
+    'foefiredie': 'foeFireDie', 'foe_fire_die': 'foeFireDie',
+    'skeltick': 'skelTick', 'skel_tick': 'skelTick',
+    'skelalert': 'skelAlert', 'skel_alert': 'skelAlert',
+    'skelcharge': 'skelCharge', 'skel_charge': 'skelCharge',
+    'skeldash': 'skelDash', 'skel_dash': 'skelDash',
+    'skelstun': 'skelStun', 'skel_stun': 'skelStun',
+    'skeldie': 'skelDie', 'skel_die': 'skelDie',
+    'bossawake': 'bossAwake', 'boss_awake': 'bossAwake',
+    'bossroar': 'bossRoar', 'boss_roar': 'bossRoar',
+    'bosssleep': 'bossSleep', 'boss_sleep': 'bossSleep',
+    'bossspit': 'bossSpit', 'boss_spit': 'bossSpit',
+    'bosshit': 'bossHit', 'boss_hit': 'bossHit',
+    'bossdeath': 'bossDeath', 'boss_death': 'bossDeath'
   };
 
+  /* ★按前缀兜底解析★：万一某个调用点漏登记别名，也不会变成"静默无声"
+     （那是最糟的失败模式 —— 用户听不到声音，也不知道为什么）。
+     `foeGhostSpawn` → 依次尝试 …Spawn / …Roar / …Die / …Hit / …Awake；
+     只在**完全找不到**时返回 null（保持既有"未知音效=静默"的语义，不抛错）。 */
+  function resolveSfxKey(name) {
+    var k = SFX_ALIAS[name] || name;
+    if (SFX_DEFS[k]) return k;
+    var m = String(k).match(/^(foeGhost|foeFire|foe|skel|boss|grave)/);
+    if (m) {
+      var pre = m[1];
+      var cands = [pre + 'Spawn', pre + 'Roar', pre + 'Die', pre + 'Hit', pre + 'Awake'];
+      for (var i = 0; i < cands.length; i++) if (SFX_DEFS[cands[i]]) return cands[i];
+    }
+    return null;
+  }
+
   function getSfxBuffer(name) {
-    var key = SFX_ALIAS[name] || name;
+    var key = resolveSfxKey(name);
+    if (!key) return null;
     if (sfxCache[key]) return sfxCache[key];
     var def = SFX_DEFS[key];
     if (!def) return null;
@@ -1272,7 +1622,10 @@
     return buf;
   }
 
-  function playSfx(name, x, y) {
+  /* opt（可选）：UI 层用它做「同一音效的音高微随机 + 分层音量」，
+     避免连点同一个按钮时听觉疲劳（一致性 > 丰富度，只在音高上做 0.9~1.1 抖动）。
+     不传 opt 时行为与旧版**逐字节等价**（rate=1 / vol=1）。 */
+  function playSfx(name, x, y, opt) {
     ensureReady();
     if (!ctx || !built) return;
     var buf = getSfxBuffer(name);
@@ -1281,6 +1634,12 @@
     var src = ctx.createBufferSource(); src.buffer = buf;
     var g = ctx.createGain();
     var gain = 1, panVal = 0;
+    var rate = 1, busVol = 1;
+    if (opt) {
+      if (typeof opt.rate === 'number' && isFinite(opt.rate)) rate = clamp(opt.rate, 0.25, 4);
+      if (typeof opt.vol === 'number' && isFinite(opt.vol)) busVol = clamp(opt.vol, 0, 4);
+    }
+    try { src.playbackRate.value = rate; } catch (e) { }
     if (typeof x === 'number' && typeof y === 'number') {
       var dx = x - listener.x, dy = y - listener.y;
       var d = Math.sqrt(dx * dx + dy * dy);
@@ -1289,8 +1648,9 @@
     }
     /* 独立音量系数：起跳/落地等高频音效在 SFX_DEFS 里给了 vol<1，
        只降音量、不改音色（距离衰减 gain 照旧相乘）。 */
-    var def = SFX_DEFS[SFX_ALIAS[name] || name];
+    var def = SFX_DEFS[resolveSfxKey(name)];
     if (def && typeof def.vol === 'number' && isFinite(def.vol)) gain *= def.vol;
+    gain *= busVol;
     g.gain.value = gain;
 
     if (typeof ctx.createStereoPanner === 'function') {
@@ -1515,7 +1875,13 @@
   function _warmList(list) {
     ensureReady();
     if (!built) return Promise.resolve(0);
-    if (MUSIC_CACHE_MAX < list.length + 2) MUSIC_CACHE_MAX = list.length + 2;
+    /* 不再按 list 长度抬高条数上限（那是"关卡数=缓存数"的老思路，
+       400 关会算出 6.3GB）。改为：只保证「内存预算 ≥ 常驻轨 + 少量滚动窗口」，
+       具体容量由 MUSIC_CACHE_BYTES 决定，LRU 自动淘汰远端关卡。
+       这样 1000 关也能稳定运行：进某关 → 该关轨进缓存 → 旧关轨按 LRU 出局。 */
+    /* ★boss 也是常驻轨★：它是**固定种子单轨**（`BOSS_THEME_V1`，所有关卡共用），
+       一旦算好就该一直留着 —— 否则进新关时被 LRU 淘汰，下次遇 BOSS 又要等 ~4.5s。 */
+    _cachePinned.menu = true; _cachePinned.pause = true; _cachePinned.boss = true;
 
     warmReady = false; warmPending = true;
     var warmTok = ++prewarmToken;
@@ -1544,7 +1910,7 @@
           try { done = job.step(budget); } catch (e) { done = true; }
           if (!done) { idle(advance); return; }
           var buf = job.finish();
-          if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); made++; }
+          if (buf) { musicCache[key] = buf; musicCacheOrder.push(key); _noteBytes(key, buf); made++; }
           idle(next);
         })();
       }
@@ -1567,12 +1933,19 @@
     },
 
     setScene: function (kind, level) {
-      if (kind !== 'menu' && kind !== 'pause' && kind !== 'level' && kind !== 'silent') kind = 'silent';
+      /* ★'boss' 是合法场景★：BOSS 激活时由 runtime 的 `_pbossBgm(true)` 切入，
+         死亡/沉睡时用 'level' 切回关卡曲。白名单必须放行，否则会被静默降级成
+         'silent'（表现为"进 BOSS 房突然没声了"）。 */
+      if (kind !== 'menu' && kind !== 'pause' && kind !== 'level' && kind !== 'boss' && kind !== 'silent') kind = 'silent';
       scene = kind;
       sceneLevel = level || null;
       ensureReady();
       if (built) _applyScene();
     },
+
+    /* ★当前场景（只读）★：供验收脚本断言"暂停→继续后是否还在 BOSS 主题"，
+       以及排查"音乐莫名切错"时直接读真实状态（而不是去数 setScene 调用）。 */
+    scene: function () { return scene; },
 
     setVolumes: function (music, sfx) {
       if (typeof music === 'number') musicVolume = clamp(music, 0, 1);
@@ -1584,7 +1957,7 @@
       }
     },
 
-    sfx: function (name, x, y) { playSfx(name, x, y); },
+    sfx: function (name, x, y, opt) { playSfx(name, x, y, opt); },
 
     setListener: function (player) {
       if (!player) return;
@@ -1673,22 +2046,44 @@
     /* 关卡 → 音乐特征（全部来自关卡数据，无人工配置） */
     levelFeatures: function (level) { return deriveMusicFeatures(level); },
 
-    /* 预热：后台空闲地把所有关卡（+菜单/暂停）的音乐预先合成进缓存，
-       这样玩家进任何关卡都是“命中缓存、零延迟起播”，彻底消除切换延迟。
-       返回 Promise，resolve 时预热完成（或在途任务被新任务替换时提前结束）。 */
-    prewarm: function (levels) {
+    /* 预热：后台空闲地把**玩家可能马上听到的**音乐预先合成进缓存，
+       这样进关卡是"命中缓存、零延迟起播"，彻底消除切换延迟。
+       ★ 关键改动：不再全量预热所有关卡（支撑大规模地图）★
+         合成一条轨要 ~1.3~1.7s CPU，400 关就是 ~10 分钟纯后台运算，而且大部分
+         会在 LRU 里被淘汰 —— 纯浪费电、还抢主线程。改为**滚动窗口**：
+         · 常驻：menu / pause（必响）；
+         · 窗口：从 `fromIdx` 起 `PREWARM_WINDOW` 关（默认向后 8 关），
+           覆盖"接下来最可能玩的几关"；
+         · 玩家真正进入某关时，`ensureTrack` 会即时把它补进缓存（若不在窗口内），
+           代价是一次 ~1.5s 的后台合成，且界面已在运行、不等它。
+       `fromIdx` 由调用方传入（game.js 传当前选中的页码起点）。
+       返回 Promise，resolve 时窗口预热完成（或在途任务被新任务替换时提前结束）。 */
+    PREWARM_WINDOW: 8,
+    prewarm: function (levels, fromIdx) {
       var list = [];
-      /* 「菜单 / 暂停」必须排在最前：它们是玩家最先听到的两段音乐。
-         若把 20 个关卡排在前面，菜单 BGM 要等 ~30s 才轮得到合成
-         （每条轨 ~1.3~1.7s CPU），这正是「开始游戏后音乐等好一阵才响」的根因。 */
+      /* 「菜单 / 暂停」必须排在最前：它们是玩家最先听到的两段音乐。 */
       list.push({ kind: 'menu', level: null });
       list.push({ kind: 'pause', level: null });
       if (levels && levels.length) {
-        for (var i = 0; i < levels.length; i++) list.push({ kind: 'level', level: levels[i] });
+        var n = levels.length;
+        /* 支持两种签名：
+             prewarm(levels)            → 从第 0 关起开窗（兼容旧调用）
+             prewarm(levels, fromIdx)   → 从指定关起开窗（推荐） */
+        var st = Number.isFinite(fromIdx) ? Math.max(0, Math.min(n - 1, Math.floor(fromIdx))) : 0;
+        var win = Math.min(n, st + (this.PREWARM_WINDOW || 8));
+        for (var i = st; i < win; i++) list.push({ kind: 'level', level: levels[i] });
       }
-      /* 预热时把缓存上限抬高，保证全部关卡常驻 */
-      if (MUSIC_CACHE_MAX < list.length + 2) MUSIC_CACHE_MAX = list.length + 2;
       return _warmList(list);
+    },
+    /* 换个窗口重新预热（翻页/跳关时调用；会作废上一次窗口任务） */
+    prewarmAt: function (levels, fromIdx) { return this.prewarm(levels, fromIdx); },
+    /* 缓存诊断（供验收脚本读取真实占用） */
+    cacheStats: function () {
+      var n = 0, b = 0;
+      for (var k in musicCache) { n++; b += (musicCacheBytes[k] || 0); }
+      return { tracks: n, bytes: b, mb: +(b / 1048576).toFixed(1),
+        maxTracks: MUSIC_CACHE_MAX, maxMB: Math.round(MUSIC_CACHE_BYTES / 1048576),
+        pinned: Object.keys(_cachePinned) };
     },
 
     /* 启动预热：进入主菜单前（甚至用户手势之前）就把「菜单/暂停」两轨算出来。
@@ -1698,7 +2093,15 @@
     bootWarm: function () {
       ensureReady();                       /* 创建（可能仍在 suspended 的）ctx + 音频图 */
       if (!built) return Promise.resolve(0);
-      return _warmList([{ kind: 'menu', level: null }, { kind: 'pause', level: null }]);
+      /* ★BOSS 轨必须一起预热★（用户报"BOSS 专属 BGM"后补）：
+         它虽是固定种子单轨，但首次合成实测 ~4.5s。若不预热，第一次进 BOSS 房时
+         "淡出关卡曲 → 淡入 BOSS 曲"会晚 4~5 秒才发生（BOSS 已苏醒、血条都出来了，
+         音乐还停在关卡曲上）。放在 menu/pause 之后：二者是玩家最先听到的两段。 */
+      return _warmList([
+        { kind: 'menu', level: null },
+        { kind: 'pause', level: null },
+        { kind: 'boss', level: null }
+      ]);
     },
 
     /* 预热进度（0..1），供加载界面显示 */

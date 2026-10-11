@@ -41,18 +41,29 @@ canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelate
      （手机版的布局由 mobile-ui.js 接管，避免两套缩放逻辑互相覆盖）。 -->
 <script>window.MOBILE_MODE=true;</script>
 <script src="levels.js"></script>
+<script src="levels.genlib.js"></script>
 <script src="audio.js"></script>
 <script src="fx.js"></script>
 <script src="runtime.js"></script>
 <script src="game.js"></script>
 <script src="mobile-ui.js"></script>
+<!-- CRT 后处理层：手机端由 crt.js 自行限定「只在局外显示」。 -->
+<script src="crt.js"></script>
 <script>
 /* 启动预热：趁加载完成的空闲时间先把「菜单/暂停」两条 BGM 合成好，
    按下开始即可几乎瞬间响起，消除等待。（合成是纯 CPU 运算，无需手势。） */
 (function(){
   function go(){ try{ if(window.AudioSystem&&AudioSystem.bootWarm) AudioSystem.bootWarm(); }catch(e){} }
-  if(document.readyState==='complete') go();
-  else window.addEventListener('load',function(){ setTimeout(go,0); });
+  /* ★推迟到首帧之后★：首次 `new AudioContext()` 是浏览器音频子系统初始化，
+     实测固定约 150ms（与关卡数无关、无法分片）。旧版 load 后立刻执行会挤在
+     首屏渲染前；改走 requestIdleCallback，启动画面先画出来再初始化音频，
+     timeout 兜底保证无渲染环境（headless / 后台标签）也一定执行。 */
+  function arm(){
+    if(typeof requestIdleCallback==='function') requestIdleCallback(go,{timeout:1500});
+    else setTimeout(go,60);
+  }
+  if(document.readyState==='complete') arm();
+  else window.addEventListener('load',arm);
 })();
 </script>
 </body>

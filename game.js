@@ -7,17 +7,39 @@ const UI_STYLE={fontSize:10,pixelSize:0.5,baseWidth:960,baseHeight:600};
 const Game=window.Game={state:'boot',levels:[],elapsed:0,simTime:0,selected:0,page:0,tab:0,ready:false,
   toast:null,transition:0,hearts:[],saveKey:'die2jump_game_save_v1',newBest:false};
 const ui=document.getElementById('ui'),g=ui.getContext('2d'),access=document.getElementById('accessibility');
-/* 明亮基调 + 高饱和着色：白/米白卡片、深墨字、金红青三色点缀，鲜明但不压抑 */
+/* WS-B v2 基调：**统一靛蓝暗域 + 单一暖金点缀 + 近白墨字**。
+   依据（2026-10-10 联网实拍参考，见 docs/reference/）：
+     动物井 / 空洞骑士 / 丝之歌 / 闰跃之年 / Baba Is You / 地狱把妹王
+   这六款的菜单共同语言是三条，恰好是本版之前做错的：
+     ① **文字即 UI**：主菜单没有任何按钮底板/边框/图标，只有字；
+     ② **整屏统一色调**：画面全在一个暗色域里，靠 6%~12% 的明度差分层，
+        不用描边、不用高光切线、不用铆钉（那些是 RPG 素材包语言）；
+     ③ **强调色面积极小**：唯一的高饱和色只出现在"当前项"，占比 < 2%。
+   因此本版：面板只保留一张**大圆角柔和暗卡**（无描边高光、四角无装饰），
+   主菜单改为**裸文字**，强调色统一收进 C.gold。 */
 const C={
-  skyInk:'#fdfbf2', skyInkDim:'#e7e0c8',
-  ink:'#23323b', inkSoft:'#53636b', inkFaint:'#8b979b',
-  paper:'#fdfaf1', paperHi:'#ffffff', paperLo:'#efe8d4',
-  line:'#546069', lineLo:'#3a464e',
-  gold:'#e0a520', goldHi:'#f7d063', goldDeep:'#a9741a',
-  red:'#d4384a', redDeep:'#8e1d28',
-  teal:'#2f9e8f', tealHi:'#66c9b8',
-  shadow:'rgba(38,51,58,0.26)'
+  skyInk:'#f2f5fa', skyInkDim:'#c3ccdb',
+  ink:'#f4f2ff', inkSoft:'#bdb4d6', inkFaint:'#837a9e',
+  /* 暗紫夜域四级：整屏底色到卡片面，只靠明度差分层（赛博朋克配色） */
+  night0:'#0a0618', night1:'#150d2a', night2:'#1f1440', night3:'#2c1d55',
+  paper:'#18102e', paperHi:'#221640', paperLo:'#0f0820',
+  line:'#4a3577', lineLo:'#2a1d4a',
+  gold:'#ffcc66', goldHi:'#ffe9a8', goldDeep:'#b4821f',
+  /* 霓虹三色：品红 / 青 / 紫（赛博朋克的招牌色，饱和度刻意不过分） */
+  neonPink:'#ff4d9d', neonCyan:'#22d3ee', neonViolet:'#a78bfa',
+  red:'#ff5577', redDeep:'#8e1d28',
+  teal:'#22d3ee', tealHi:'#7dd3e8',
+  shadow:'rgba(4,2,12,0.50)',
+  edge:'#05030e', well:'#0f0822', face:'#1c1238', faceHot:'#2a1a52'
 };
+/* 每屏额外的压暗量。
+   ⚠️ WS-B v3：**这里已经不需要"盖黑纱"了** —— `sky()` 直接绘制原生暗色夜景
+   （深靛夜空 + 冷月 + 星野 + 剪影群山），整幅画面本身就在暗色域里，
+   这正是参考（动物井 / 空洞骑士 / 闰跃之年）的做法。
+   给亮图盖半透明黑纱只会把插画压成灰糊底、还露出原来的亮蓝天，两头不讨好。
+   因此本表数值全部为 0；仅**模态弹窗**保留一点点压暗（让底层画面退后，聚焦弹窗）。 */
+const SCRIM={boot:0,menu:0,levels:0,settings:0,help:0,quit:0,
+  pause:.16,win:.20,fail:.20,resetConfirm:.34,exitConfirm:.34};
 let scale=1,W=960,H=600,last=performance.now(),acc=0,clock=0,buttons=[],pointer={x:-1,y:-1,down:false},dragSlider=null,hoverId='',focusId='',screenKey='';
 /* 响应式布局单位（在 resize() 里重算）
    VS：纵向呼吸量。16:9 视口恒为 1（观感与既有版本完全一致）；
@@ -25,7 +47,63 @@ let scale=1,W=960,H=600,last=performance.now(),acc=0,clock=0,buttons=[],pointer=
    HS：横向呼吸量。宽屏 / 超宽屏放大，用于选关网格横向铺开更多卡片。 */
 let VS=1,HS=1;
 const clone=x=>JSON.parse(JSON.stringify(x));
-function readSave(){try{const v=JSON.parse(localStorage.getItem(Game.saveKey)||'{}');return{completed:v.completed||{},best:v.best||{},trophies:v.trophies||{},music:Math.max(0,Math.min(1,Number.isFinite(v.music)?v.music:.6)),sfx:Math.max(0,Math.min(1,Number.isFinite(v.sfx)?v.sfx:.8))};}catch(e){return{completed:{},best:{},trophies:{},music:.6,sfx:.8};}}
+/* ============================================================================
+   WS-B · 界面重制（动效 / 调色 / 无障碍）
+   ----------------------------------------------------------------------------
+   调研结论（2026-10-10 联网检索，见 docs/四工作流实施规划.md §2）：
+     · 时长：hover/press 80~150ms；小元素 150~200ms；面板 250~350ms；页面转场 300~400ms
+     · 缓动：进入 ease-out（快进慢停）／离开 ease-in／位移 ease-in-out／循环 linear
+     · 曲线只定义 3~5 条，多了风格会散；hover 缩放 1.03~1.06（超过就廉价）
+     · press 位移 1~2px；音高随机 0.9~1.1 避免听觉疲劳
+     · 无障碍：prefers-reduced-motion 时以淡入淡出替代位移/缩放，不用动画承载唯一信息
+   本模块只做「求值 + 曲线」，不持有绘制状态；所有动效都可由 clock 纯函数式推出，
+   因此**不引入累积误差、不依赖帧率**（掉帧只会跳帧不会错位）。
+   ========================================================================== */
+const MOTION=(function(){
+  let reduce=false,rmq=null;
+  try{rmq=window.matchMedia('(prefers-reduced-motion: reduce)');reduce=!!rmq.matches;
+      if(rmq.addEventListener)rmq.addEventListener('change',e=>{reduce=!!e.matches;});}catch(e){}
+  return{
+    get reduced(){return reduce;},
+    dur:ms=>reduce?Math.min(90,ms):ms,
+    /* 进入：快进慢停（三次方 ease-out，收敛快、无过冲，比二次方更“干净”） */
+    easeOut:t=>{t=t<0?0:t>1?1:t;const u=1-t;return 1-u*u*u;},
+    /* 离开：慢起快走 */
+    easeIn:t=>{t=t<0?0:t>1?1:t;return t*t*t;},
+    /* 位移：两端平滑 */
+    easeInOut:t=>{t=t<0?0:t>1?1:t;return t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;},
+    /* 强调：轻微过冲（只用于“被选中/获得”这类需要强调的瞬间，不用于常规反馈） */
+    back:t=>{t=t<0?0:t>1?1:t;const c=1.70158+1;return 1+(c+1)*Math.pow(t-1,3)+c*Math.pow(t-1,2);},
+    /* 最省事的“入场进度”：s 秒前开始、d 秒内完成 */
+    at:(startS,s,d)=>{const t=(s-startS)/Math.max(.0001,d);return t<0?0:t>1?1:t;},
+    /* 高阻尼弹簧（无过冲），用于 hover 缩放 —— 比裸 lerp 更有生命感又不会“弹” */
+    spring:(current,target,dt,k)=>{const kk=k||16;return current+(target-current)*Math.min(1,kk*dt);}
+  };
+})();
+/* 交互音效统一出口：同一交互恒用同一音，只做音高微随机（0.9~1.1）与音量分层。
+   一致性 > 丰富度；厚音给主要动作，薄音给次要动作。 */
+function snd(name,opt){try{AudioSystem.sfx(name,undefined,undefined,opt);}catch(e){}}
+function sndUI(kind){
+  if(kind==='hover')snd('uiHover',{rate:0.96+Math.random()*0.08,vol:0.5});
+  else if(kind==='press')snd('uiClick',{rate:0.94+Math.random()*0.10,vol:1});
+  else if(kind==='confirm')snd('uiClick',{rate:1.06+Math.random()*0.06,vol:1.1});
+  else if(kind==='back')snd('uiHover',{rate:0.82+Math.random()*0.06,vol:0.8});
+}
+/* ★CRT 存档字段★
+     · crt      —— 总开关（唯一可调项：设置/暂停页只保留这一枚开关）。
+     · crtScan  —— 扫描线开关（★v3 起不再暴露调节入口★，恒为开；
+                    旧存档若存过 false 也一律读回 true，保证"保留老旧电视效果"）。
+     · crtCurve —— 曲率手感值 0..1（★v3 起不再暴露调节入口★，恒为默认值）。
+       保留字段只为兼容旧存档的读写，不再参与 UI；缺省值必须与 crt.js 的
+       CURVE_DEFAULT 一致，避免"存的值与实际画的曲率漂移"。 */
+function readSave(){try{const v=JSON.parse(localStorage.getItem(Game.saveKey)||'{}');
+  return{completed:v.completed||{},best:v.best||{},trophies:v.trophies||{},
+    music:Math.max(0,Math.min(1,Number.isFinite(v.music)?v.music:.6)),
+    sfx:Math.max(0,Math.min(1,Number.isFinite(v.sfx)?v.sfx:.8)),
+    crt:v.crt!==false,
+    crtScan:true,
+    crtCurve:.45};}
+  catch(e){return{completed:{},best:{},trophies:{},music:.6,sfx:.8,crt:true,crtScan:true,crtCurve:.45};}}
 Game.save=readSave();
 function persist(){try{localStorage.setItem(Game.saveKey,JSON.stringify(Game.save));}catch(e){notify('存档写入失败');}}
 function trophyKey(id){return (Game.levels[Game.selected]?.key||'')+'::'+id;}
@@ -36,71 +114,269 @@ function notify(t){Game.toast={text:String(t),until:clock+2.8};}
 window.toast=notify;
 
 /* ---------------------------------------------------------------- 位图文字 */
-function text(s,x,y,color=C.ink,mul=1,alpha=1){g.save();if(alpha!==1)g.globalAlpha=alpha;g.translate(x,y);g.scale(mul,mul);drawPixelText(g,String(s),0,0,UI_STYLE.fontSize,color,null,1,UI_STYLE.pixelSize);g.restore();}
+/* text(s,x,y,color,mul,alpha,outline)：以 (x,y) 为中心绘制。
+   `outline` 是**可选的暗色描边**——runtime 的 drawPixelText 原生支持四向描边，
+   这里把它接出来。赛博朋克背景（楼宇窗格）对比度极高，裸文字极易被亮点吃掉，
+   描边是像素游戏标题的通行解法，比压暗背景更稳且不损失画面。 */
+function text(s,x,y,color=C.ink,mul=1,alpha=1,outline=null){g.save();if(alpha!==1)g.globalAlpha=alpha;g.translate(x,y);g.scale(mul,mul);drawPixelText(g,String(s),0,0,UI_STYLE.fontSize,color,null,1,UI_STYLE.pixelSize,outline);g.restore();}
 /* text() 默认以 x 为中心；下面两个助手用于左/右对齐排版 */
 function textW(s,mul=1){const b=_getPxTextBitmap(String(s),UI_STYLE.fontSize,'#ffffff',UI_STYLE.pixelSize);return b.w*UI_STYLE.pixelSize*mul;}
 function textLeft(s,x,y,color=C.ink,mul=1,alpha=1){text(s,x+textW(s,mul)/2,y,color,mul,alpha);}
 function textRight(s,x,y,color=C.ink,mul=1,alpha=1){text(s,x-textW(s,mul)/2,y,color,mul,alpha);}
+/* ★数字型「每帧都在变」的文字：逐字位图合成★
+   典型场景 = 局内 HUD 计时器（`00:12.34`）。若沿用 text() 的**整串**缓存，
+   字符串每帧都不同 ⇒ 每帧必然 cache miss ⇒ 每帧新建两个 canvas +
+   `getImageData` 回读（GPU→CPU 同步，真机会卡管线）+ O(cols·rows·SS²) 二值化
+   双循环（实测 **1.62ms/帧**），而且会把 384 条 FIFO 缓存冲刷干净
+   （选关页的关卡名/时间值被驱逐，重进又要冷建）。
+   计时器只用 `0-9 : . -` 共 13 个字形 ⇒ 逐字缓存后**稳态零重建、零分配**。
+   · 间距正确性：整串渲染的字进 = charWidth + gap；单字位图宽 = ceil((charWidth+SS)/SS)
+     个输出列 = (charWidth+SS) 超采样像素。10 号字实测两者都 = 72 超采样像素
+     ⇒ 逐字拼接与整串渲染**逐像素吻合**，观感不变（`:`/`.` 差 0.25 列，不可见）。
+   · 必须走 text() 同一条路径（translate+scale），保证与其它 UI 文字同一缩放/取整口径。 */
+const _monoGlyphCache=new Map();
+function _monoGlyph(ch,color){
+  const key=ch+'|'+color;
+  let v=_monoGlyphCache.get(key);
+  if(v)return v;
+  const b=_getPxTextBitmap(ch,UI_STYLE.fontSize,color,UI_STYLE.pixelSize);
+  v={cv:b.canvas,w:b.w,h:b.h};_monoGlyphCache.set(key,v);return v;
+}
+function textMono(s,x,y,color=C.ink,mul=1,alpha=1){
+  s=String(s);if(!s)return;
+  const ps=UI_STYLE.pixelSize;
+  let tot=0;const gl=[];
+  for(let i=0;i<s.length;i++){const v=_monoGlyph(s[i],color);gl.push(v);tot+=v.w;}
+  g.save();if(alpha!==1)g.globalAlpha=alpha;g.imageSmoothingEnabled=false;
+  g.translate(x,y);g.scale(mul,mul);
+  let cx=-tot*ps/2;
+  for(let i=0;i<gl.length;i++){const v=gl[i],tw=v.w*ps;g.drawImage(v.cv,cx,-v.h*ps/2,tw,v.h*ps);cx+=tw;}
+  g.restore();
+}
 function bitmapOf(s,ps){const b=_getPxTextBitmap(String(s),UI_STYLE.fontSize,'#ffffff',ps);return{canvas:b.canvas,w:b.w*ps,h:b.h*ps};}
 /* 明快卡通描边：内部金色纵向渐变 + 一圈均匀、克制的深色描边。
    不使用任何背景板；整块缓存，每帧仅一次 drawImage，保证性能。 */
 const _styledCache=new Map();
 const GOLD=['#ffffff','#fff6c4','#ffcb33','#e08c0e'];
 const GOLD_RED=['#fff4f4','#ff9aa2','#e23450','#8e1d28'];
-function styledText(s,cx,cy,mul,colors,outline=2,basePs=0.25){
-  const key=s+'|'+mul+'|'+colors.join('')+'|'+outline+'|'+basePs;
+/* ★把"造位图"从"贴位图"里拆出来★
+   原因：预热必须在**不污染画面**的前提下，走**与渲染完全相同**的那条代码路径。
+   旧版预热是"手工照抄一份字符串/颜色清单"，一旦渲染侧改色值/改字号，
+   预热清单就静默失效 —— 实测手机端 header() 走 styledText（渐变金 + basePs 0.25）、
+   textLeft() 内部还会调 textW()（白色变体），手工清单全都漏了，
+   于是进选关页仍要冷烘 44 个字 ≈ 79ms ⇒ 长任务。拆开后可被预热直接复用。 */
+function _styledNormalize(colors){return Array.isArray(colors)&&colors.length>=4?colors:GOLD;}
+function _styledKeyOf(s,mul,colors,outline,basePs){
+  const cs=_styledNormalize(colors);
+  return s+'|'+mul+'|'+cs.join('')+'|'+outline+'|'+basePs;
+}
+/* 只负责"算并缓存"，不碰 g —— 预热与渲染都调它，保证同一条路径、同一份缓存。 */
+function _styledBuild(s,mul,colors,outline,basePs){
+  const cs=_styledNormalize(colors);
+  const key=_styledKeyOf(s,mul,cs,outline,basePs);
   let out=_styledCache.get(key);
-  if(!out){
-    const b=bitmapOf(s,basePs),w=Math.max(1,Math.round(b.w*mul)),h=Math.max(1,Math.round(b.h*mul));
-    const core=document.createElement('canvas');core.width=w;core.height=h;
-    const cg=core.getContext('2d');cg.imageSmoothingEnabled=false;cg.drawImage(b.canvas,0,0,w,h);
-    cg.globalCompositeOperation='source-in';const gr=cg.createLinearGradient(0,0,0,h);
-    gr.addColorStop(0,colors[0]);gr.addColorStop(.46,colors[1]);gr.addColorStop(.52,colors[2]);gr.addColorStop(1,colors[3]);
-    cg.fillStyle=gr;cg.fillRect(0,0,w,h);
-    /* 深色剪影仅用于描边，颜色偏暖，避免发黑发脏 */
-    const mat=document.createElement('canvas');mat.width=w;mat.height=h;const mg=mat.getContext('2d');
-    mg.imageSmoothingEnabled=false;mg.drawImage(core,0,0);mg.globalCompositeOperation='source-in';mg.fillStyle='#4a2f06';mg.fillRect(0,0,w,h);
-    const o=Math.max(1,Math.round(outline)),pad=o+2;
-    out=document.createElement('canvas');out.width=w+pad*2;out.height=h+pad*2;
-    const og=out.getContext('2d');og.imageSmoothingEnabled=false;
-    for(let dx=-o;dx<=o;dx++)for(let dy=-o;dy<=o;dy++){if(Math.abs(dx)+Math.abs(dy)>o*1.45)continue;og.drawImage(mat,pad+dx,pad+dy);}
-    og.drawImage(core,pad,pad);
-    _styledCache.set(key,out);
-    if(_styledCache.size>64)_styledCache.delete(_styledCache.keys().next().value);
-  }
+  if(out)return out;
+  const b=bitmapOf(s,basePs),w=Math.max(1,Math.round(b.w*mul)),h=Math.max(1,Math.round(b.h*mul));
+  const core=document.createElement('canvas');core.width=w;core.height=h;
+  const cg=core.getContext('2d');cg.imageSmoothingEnabled=false;cg.drawImage(b.canvas,0,0,w,h);
+  cg.globalCompositeOperation='source-in';const gr=cg.createLinearGradient(0,0,0,h);
+  gr.addColorStop(0,cs[0]);gr.addColorStop(.46,cs[1]);gr.addColorStop(.52,cs[2]);gr.addColorStop(1,cs[3]);
+  cg.fillStyle=gr;cg.fillRect(0,0,w,h);
+  /* 深色剪影仅用于描边，颜色偏暖，避免发黑发脏 */
+  const mat=document.createElement('canvas');mat.width=w;mat.height=h;const mg=mat.getContext('2d');
+  mg.imageSmoothingEnabled=false;mg.drawImage(core,0,0);mg.globalCompositeOperation='source-in';mg.fillStyle='#4a2f06';mg.fillRect(0,0,w,h);
+  const o=Math.max(1,Math.round(outline)),pad=o+2;
+  out=document.createElement('canvas');out.width=w+pad*2;out.height=h+pad*2;
+  const og=out.getContext('2d');og.imageSmoothingEnabled=false;
+  for(let dx=-o;dx<=o;dx++)for(let dy=-o;dy<=o;dy++){if(Math.abs(dx)+Math.abs(dy)>o*1.45)continue;og.drawImage(mat,pad+dx,pad+dy);}
+  og.drawImage(core,pad,pad);
+  _styledCache.set(key,out);
+  if(_styledCache.size>64)_styledCache.delete(_styledCache.keys().next().value);
+  return out;
+}
+function styledText(s,cx,cy,mul,colors,outline=2,basePs=0.25){
+  const out=_styledBuild(s,mul,colors,outline,basePs);
   g.imageSmoothingEnabled=false;g.drawImage(out,Math.round(cx-out.width/2),Math.round(cy-out.height/2));
 }
 /* ------------------------------------------------------------- 基础绘制件 */
+/* 圆角矩形：改用**真实贝塞尔圆弧**。
+   旧版为迁就"全局关抗锯齿"的像素语言，用 2px 阶梯近似圆角 —— 小半径尚可，
+   一旦卡片半径 >6px 就会露出明显锯齿，正是"廉价感"的来源之一。
+   实测：Canvas 的路径填充**不受** imageSmoothingEnabled 影响，始终带抗锯齿，
+   因此大圆角卡片用圆弧既平滑又零额外代价（与像素块、位图文字互不干扰）。 */
+function rrect(x,y,w,h,r,c){r=Math.max(0,Math.min(r,Math.floor(Math.min(w,h)/2)));x=Math.round(x);y=Math.round(y);w=Math.round(w);h=Math.round(h);
+  if(r<=0){rect(x,y,w,h,c);return;}
+  g.fillStyle=c;g.beginPath();
+  if(g.roundRect){g.roundRect(x,y,w,h,r);}else{
+    g.moveTo(x+r,y);g.lineTo(x+w-r,y);g.quadraticCurveTo(x+w,y,x+w,y+r);
+    g.lineTo(x+w,y+h-r);g.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+    g.lineTo(x+r,y+h);g.quadraticCurveTo(x,y+h,x,y+h-r);
+    g.lineTo(x,y+r);g.quadraticCurveTo(x,y,x+r,y);}
+  g.fill();}
 function rect(x,y,w,h,c){g.fillStyle=c;g.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));}
-function stud(x,y){rect(x,y,2,2,C.gold);rect(x+1,y+1,1,1,C.goldDeep);}
-function shadowRect(x,y,w,h){rect(x+4,y+5,w,h,C.shadow);}
-/* 浅色硬边框卡片：亮底深字，鲜明而不压抑 */
-function panel(x,y,w,h,opt={}){const tone=opt.tone||'paper';
+/* 极简点缀：一颗 3px 暖金菱点（替换旧版四角铆钉）。
+   参考里唯一的装饰就是"一两个小色点"，多了立刻变素材包。 */
+function stud(x,y){rect(x,y-1,1,3,C.gold);rect(x-1,y,3,1,C.gold);rect(x,y,1,1,C.goldHi);}
+function shadowRect(x,y,w,h){rrect(x+2,y+6,w,h,10,'rgba(2,3,10,0.55)');}
+/* 统一暗域：把整屏压进同一个靛蓝暗域，让亮天空只作氛围底。
+   一张 1×N 竖向渐变就够（比径向便宜），并缓存为精灵；
+   顶部略透、底部略实，模拟"地底光源从上方渗入"的观感（动物井同感）。 */
+let _scrimPx=null;
+function _scrimFor(a){
+  if(_scrimPx&&Math.abs(_scrimPx._a-a)<0.01)return _scrimPx;
+  const c=document.createElement('canvas');c.width=1;c.height=256;
+  const q=c.getContext('2d');const gr=q.createLinearGradient(0,0,0,256);
+  gr.addColorStop(0,`rgba(9,12,24,${(a*0.82).toFixed(3)})`);
+  gr.addColorStop(.40,`rgba(10,14,28,${(a*0.94).toFixed(3)})`);
+  gr.addColorStop(1,`rgba(6,8,18,${Math.min(1,a*1.08).toFixed(3)})`);
+  q.fillStyle=gr;q.fillRect(0,0,1,256);c._a=a;_scrimPx=c;return c;}
+function scrim(state){
+  const a=SCRIM[state];if(!a)return;
+  const sp=_scrimFor(a);
+  g.imageSmoothingEnabled=true;g.drawImage(sp,0,0,1,256,0,0,W,H);g.imageSmoothingEnabled=false;
+}
+/* 柔和暗卡：本版的**唯一**面板语言。
+   层级 —— 柔和投影 → 大圆角暗面 → 内侧一道极淡顶缘色线 →（tone=gold/teal 时）霓虹顶缘。
+   WS-B v4 加入**入场扫光**：面板首次出现时，一道霓虹光带从左扫到右（380ms，只扫一次）。
+   这是"画面是活的"最廉价的一招 —— 无需改变任何静态构图。 */
+/* 柔和暗卡：本版的**唯一**面板语言。
+   层级 —— 柔和投影 → 大圆角暗面 → 内侧一道极淡顶缘色线 →（tone=gold/teal 时）霓虹顶缘。
+   WS-B v4 加入**入场扫光**：面板首次出现时，一道霓虹光带从左扫到右（380ms，只扫一次）。
+   这是"画面是活的"最廉价的一招 —— 无需改变任何静态构图。 */
+function panel(x,y,w,h,opt={}){const tone=opt.tone||'paper',r=opt.r==null?12:opt.r;
   shadowRect(x,y,w,h);
-  rect(x,y,w,h,C.lineLo);
-  rect(x+2,y+2,w-4,h-4,opt.border||C.line);
-  rect(x+4,y+4,w-8,h-8,tone==='gold'?C.goldHi:tone==='teal'?C.tealHi:C.paper);
-  rect(x+6,y+6,w-12,2,tone==='gold'?C.gold:tone==='teal'?'#1d6f66':C.paperHi);
-  rect(x+6,y+h-8,w-12,2,tone==='gold'?'#c98f18':tone==='teal'?'#1d6f66':C.paperLo);
-  stud(x+8,y+8);stud(x+w-10,y+8);stud(x+8,y+h-10);stud(x+w-10,y+h-10);}
-function inset(x,y,w,h){rect(x,y,w,h,C.lineLo);rect(x+2,y+2,w-4,h-4,'#fdf8e6');rect(x+2,y+2,w-4,1,'#cbbf9e');}
+  /* === 对比度修复（用户反馈"卡片与背景糊在一起"） ===
+     根因：旧版是「外壳 + 内缩 2px 的**更暗**内面」，而 C.paper(#18102e)
+     比 C.face(#1c1238) 还暗 —— 等于把卡片做成了一块与赛博夜雨背景同色的暗斑，
+     完全没有边界；仅靠一条 alpha 0.22 的短顶线根本立不住。
+     改为明确的三层结构（无论背景是暗紫楼宇还是霓虹亮斑都清晰可辨）：
+       ① 亮描边：外扩 1px 的紫罗兰/金/青 —— 给卡片一条明确边界；
+       ② 暗外壳 C.face —— 把卡片从背景里"切"出来；
+       ③ 较亮内面 C.paperHi —— 制造"抬起受光"的明度差（比外壳亮一档）。 */
+  const edgeCol=tone==='gold'?'rgba(255,204,102,0.46)':tone==='teal'?'rgba(34,211,238,0.42)':'rgba(157,131,228,0.46)';
+  const edge2=tone==='gold'?'rgba(255,204,102,0.20)':tone==='teal'?'rgba(34,211,238,0.18)':'rgba(157,131,228,0.20)';
+  const face=tone==='gold'?C.faceHot:tone==='teal'?C.faceHot:C.face;
+  const inner=(tone==='gold'||tone==='teal')?C.faceHot:C.paperHi;
+  /* 三层边界：外晕(2px) + 亮描边(1px) + 暗外壳 + 较亮内面。
+     两层递减描边替代 shadowBlur（filter 每帧开销大），零额外代价却同样有"霓虹外晕"感。 */
+  rrect(x-2,y-2,w+4,h+4,r+2,edge2);
+  rrect(x-1,y-1,w+2,h+2,r+1,edgeCol);
+  rrect(x,y,w,h,r,face);
+  rrect(x+1,y+1,w-2,h-2,Math.max(2,r-1),inner);
+  /* 顶部高光：**整宽渐隐**的亮线（两端淡出），比旧版短硬线更像受光边缘 */
+  if(tone==='gold')rect(x+1,y+2,w-2,1,'rgba(255,222,140,0.55)');
+  else if(tone==='teal')rect(x+1,y+2,w-2,1,'rgba(150,235,255,0.50)');
+  else{const hl=g.createLinearGradient(x,0,x+w,0);
+    hl.addColorStop(0,'rgba(214,198,255,0)');hl.addColorStop(.5,'rgba(214,198,255,0.34)');hl.addColorStop(1,'rgba(214,198,255,0)');
+    g.fillStyle=hl;g.fillRect(x+1,y+2,w-2,1);}
+  /* 入场扫光：页面出现后 0.42s 内，每块面板扫过一道斜向霓虹亮带。
+     基准用 `_pageT0`（本页面出场时刻）而不是"面板首次被绘制"——
+     后者需要在 map 里记每个面板、且停留久了会反复重扫（踩过这个坑）。 */
+  if(!MOTION.reduced&&w>60&&h>36){
+    const age=clock-_pageT0;
+    if(age>=0&&age<0.42){const p=age/0.42,wx=x-Math.round(w*0.5)+Math.round(w*1.6*p);
+      g.save();g.beginPath();g.rect(x,y,w,h);g.clip();
+      g.globalCompositeOperation='lighter';g.globalAlpha=(1-p)*0.20;
+      const sg2=g.createLinearGradient(wx-40,0,wx+40,0);
+      sg2.addColorStop(0,'rgba(167,139,250,0)');sg2.addColorStop(.5,'rgba(210,190,255,0.9)');
+      sg2.addColorStop(1,'rgba(167,139,250,0)');
+      g.fillStyle=sg2;g.fillRect(wx-40,y,80,h);g.restore();}
+  }
+}
+/* 凹槽（暗色内嵌，用于滑条轨道 / 信息条底）：去描边，只留一层暗面 */
+function inset(x,y,w,h){rrect(x,y,w,h,3,C.well);rect(x+3,y+1,w-6,1,'rgba(0,0,0,0.30)');}
 function heart(x,y,s=2,color=C.red,broken=0){const map=['01100110','11111111','11111111','01111110','00111100','00011000'];map.forEach((row,j)=>[...row].forEach((v,i)=>{if(v==='1'){const dx=broken?(i<4?-broken:broken):0;rect(x+i*s+dx,y+j*s+(broken?Math.abs(i-3.5)*broken*.32:0),s,s,color);}}));if(!broken){rect(x+s,y+s,2*s,s,'#ff9aa2');rect(x+2*s,y+3*s,s,s,C.redDeep);}}
 function flagIcon(x,y,s=2){rect(x,y,s,10*s,'#4b565f');rect(x+s,y,7*s,4*s,C.gold);rect(x+s,y+s,5*s,s,C.goldHi);rect(x-2*s,y+10*s,5*s,s,'#5f6f4e');}
-function icon(name,x,y,s=1){g.save();g.translate(x,y);g.scale(s,s);if(name==='trophy')drawTrophyTo(g,{x:-6,y:-7,w:12,h:14});else if(name==='flag')flagIcon(-4,-8,1);else if(name==='heart')heart(-4,-3,1);else if(name==='pause'){rect(-5,-6,3,12,C.ink);rect(2,-6,3,12,C.ink);}else if(name==='lock'){rect(-6,-1,12,9,C.inkSoft);rect(-4,-6,8,6,C.inkSoft);rect(-3,-1,6,8,'#fdf8e6');rect(-1,1,2,4,C.inkSoft);}else if(name==='back'){for(let i=0;i<5;i++){rect(-7+i,-5+i,2,2,C.ink);rect(-7+i,5-i,2,2,C.ink);}rect(-3,-1,11,2,C.ink);}else if(name==='play'){for(let i=0;i<9;i++)rect(-5+i,-7+i,2,15-2*i,C.goldDeep);}else if(name==='gear'){rect(-5,-5,10,10,C.ink);rect(-2,-9,4,18,C.ink);rect(-9,-2,18,4,C.ink);rect(-2,-2,4,4,C.paper);}else if(name==='book'){rect(-7,-6,14,12,C.ink);rect(-5,-4,4,8,C.paper);rect(1,-4,4,8,C.paper);rect(-1,-6,2,12,C.ink);}else if(name==='exit'){rect(-7,-7,11,14,C.ink);rect(-5,-5,7,10,C.paper);rect(0,-1,11,2,C.ink);rect(7,-3,2,6,C.ink);rect(4,-5,2,3,C.ink);rect(4,2,2,3,C.ink);}else if(name==='sound'){rect(-7,-2,4,4,C.ink);rect(-3,-5,3,10,C.ink);rect(1,-7,2,14,C.goldDeep);rect(4,-5,2,10,C.goldDeep);}g.restore();}
+function icon(name,x,y,s=1){g.save();g.translate(x,y);g.scale(s,s);if(name==='trophy')drawTrophyTo(g,{x:-6,y:-7,w:12,h:14});else if(name==='flag')flagIcon(-4,-8,1);else if(name==='heart')heart(-4,-3,1);else if(name==='pause'){rrect(-5,-6,3,12,1,C.ink);rrect(2,-6,3,12,1,C.ink);}else if(name==='lock'){rrect(-6,-1,12,9,2,C.inkSoft);rrect(-4,-6,8,6,3,C.inkSoft);rect(-3,-1,6,8,C.well);rect(-1,1,2,4,C.gold);}else if(name==='back'){for(let i=0;i<5;i++){rect(-7+i,-5+i,2,2,C.ink);rect(-7+i,5-i,2,2,C.ink);}rect(-3,-1,11,2,C.ink);}else if(name==='play'){for(let i=0;i<9;i++)rect(-5+i,-7+i,2,15-2*i,C.gold);}else if(name==='gear'){rect(-5,-5,10,10,C.ink);rect(-2,-9,4,18,C.ink);rect(-9,-2,18,4,C.ink);rect(-2,-2,4,4,C.well);}else if(name==='book'){rect(-7,-6,14,12,C.ink);rect(-5,-4,4,8,C.paperHi);rect(1,-4,4,8,C.paperHi);rect(-1,-6,2,12,C.ink);}else if(name==='exit'){rect(-7,-7,11,14,C.ink);rect(-5,-5,7,10,C.well);rect(0,-1,11,2,C.ink);rect(7,-3,2,6,C.ink);rect(4,-5,2,3,C.ink);rect(4,2,2,3,C.ink);}else if(name==='sound'){rect(-7,-2,4,4,C.ink);rect(-3,-5,3,10,C.ink);rect(1,-7,2,14,C.gold);rect(4,-5,2,10,C.gold);}
+  /* ★复古电视三枚图标★（设置页专用：总开关 / 扫描线 / 曲率）
+     与其它图标同一规格：以 (0,0) 为中心、约 16×14 的可视盒。 */
+  else if(name==='crt'){rect(-8,-7,16,12,C.ink);rect(-6,-5,12,7,C.well);
+    rect(-5,-4,10,2,'rgba(255,255,255,0.22)');rect(-8,5,16,1,C.ink);
+    rect(-5,6,3,2,C.ink);rect(2,6,3,2,C.ink);}
+  else if(name==='scan'){rect(-8,-7,16,14,C.ink);rect(-6,-4,12,1,C.well);
+    rect(-6,-1,12,1,C.well);rect(-6,2,12,1,C.well);}
+  else if(name==='curve'){rect(-8,-7,16,14,C.ink);
+    /* 同心像素圆（外圈=暗角、内圈=中心鼓光）⇒ 一眼读作"球面" */
+    const _cr=[[-5,6],[-4,10],[-3,12],[-2,12],[-1,12],[0,12],[1,12],[2,12],[3,10],[4,6]];
+    for(const _r of _cr)rect(-_r[1]/2,_r[0],_r[1],1,C.well);
+    const _cr2=[[-3,4],[-2,6],[-1,8],[0,8],[1,6],[2,4]];
+    for(const _r of _cr2)rect(-_r[1]/2,_r[0],_r[1],1,C.paperHi);
+    rect(-3,-3,2,2,C.goldHi);}
+  g.restore();}
+let _pageT0=0;
 function inRect(p,b){return p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h;}
-/* 亮底按钮：悬停转金色、主要动作转金底深字，文字始终深色保证可读 */
-function button(id,label,x,y,w,h,fn,opt={}){const b={id,label,x,y,w,h,fn,disabled:!!opt.disabled};buttons.push(b);
-  const hot=!b.disabled&&(inRect(pointer,b)||focusId===id);const dy=hot?(pointer.down?2:-2):0;const gold=!!opt.primary;
-  const face=opt.disabled?'#e2ddcc':hot?'#ffe294':gold?C.goldHi:C.paper;
-  shadowRect(x,y+dy,w,h);
-  rect(x,y+dy,w,h,C.lineLo);
-  rect(x+2,y+2+dy,w-4,h-4,opt.disabled?'#c8c3b0':hot?C.gold:gold?C.gold:C.line);
-  rect(x+4,y+4+dy,w-8,h-8,face);
-  rect(x+6,y+6+dy,w-12,2,opt.disabled?'#efeadd':hot?'#fff6cf':gold?'#fffbe8':C.paperHi);
-  rect(x+6,y+h-8+dy,w-12,2,opt.disabled?'#cbc6b4':hot?'#d3a12a':gold?'#d3a12a':C.paperLo);
-  if(hot&&w>20){rect(x+3,y+14+dy,w-6,2,'#e8b83a');rect(x+3,y+h-16+dy,w-6,2,'#e8b83a');}
-  if(opt.icon)icon(opt.icon,x+26,y+h/2+dy,1.35);
-  text(label,x+w/2+(opt.icon?10:0),y+h/2+dy,opt.disabled?C.inkFaint:C.ink,1.16);}
+/* ---------- 霓虹涟漪（点击反馈的"视觉回声"） ----------
+   每次按下按钮，在落点炸开一圈扩散的霓虹方环（像素风：用 4 段矩形边框画出）。
+   与音效（sndUI('press')）同帧触发，视觉与听觉一起给到"我按到了"的确认。
+   涟漪只是**加法**：不改变按钮本身的位置/颜色，因此不干扰既有 hover 逻辑。 */
+const _ripples=[];
+function ripple(x,y,col){if(MOTION.reduced)return;if(_ripples.length>10)_ripples.shift();
+  _ripples.push({x,y,t0:clock,col:col||C.neonViolet});}
+function drawRipples(){if(!_ripples.length)return;
+  for(let i=_ripples.length-1;i>=0;i--){const rp=_ripples[i],age=clock-rp.t0;
+    if(age>0.46){_ripples.splice(i,1);continue;}
+    const p=age/0.46,rad=14+p*46,al=(1-p)*(1-p)*0.72;
+    g.save();g.globalAlpha=al;g.fillStyle=rp.col;
+    for(let k=0;k<4;k++){const side=k<2?rad*2:rad*1.1;
+      if(k===0){g.fillRect(rp.x-rad, rp.y-rad, side,2);}
+      else if(k===1){g.fillRect(rp.x-rad, rp.y+rad-2, side,2);}
+      else if(k===2){g.fillRect(rp.x-rad, rp.y-rad, 2, side);}
+      else{g.fillRect(rp.x+rad-2, rp.y-rad, 2, side);}}
+    g.restore();}
+}
+/* ---------- 差动入场（stagger） ----------
+   把「本轮界面出现后经过的时间」换算成 0→1 的进度，供每个元素按序号错开淡入上浮。
+   进度由 clock 推出，掉帧只会跳帧不会卡在半路。seq 越大越晚出场。
+   ⚠️ **必须始终调用 draw()**（哪怕进度还是 0）：
+   若在进度为 0 时跳过绘制，页面刚出现的那一瞬间该按钮根本不存在 ——
+   点击热区与无障碍 DOM 节点都会缺失（看似被输入闸门掩盖，但闸门只对触摸生效，
+   鼠标玩家的快速点击会直接落空）。让"按钮始终存在、只有外观在动"才是正确语义。 */
+function enterT(seq){if(MOTION.reduced)return 1;
+  const t=clock-_pageT0-seq*0.055;if(t<=0)return 0;
+  return MOTION.easeOut(Math.min(1,t/0.34));}
+function staggerBlock(scale,seq,draw){
+  const a=enterT(seq);
+  g.save();g.globalAlpha=a;g.translate(0,Math.round((1-a)*14)*scale);draw();g.restore();}
+/* 按钮：两种语言，对应参考里的两种真实场景。
+   · **裸文字（opt.plain）**——主菜单专用。参考中六款游戏的主菜单都没有按钮底板，
+     只有字。选中项靠：字色转暖金 + 左侧一颗小菱点 + 轻微右移 4px（位移而非缩放，
+     更克制）。这让菜单从"一组控件"变成"一幅排版好的画面"。
+   · **柔和卡片（默认）**——选关页/设置/弹窗等需要明确点击区的地方。
+     不再用描边 + 内高光 + 四角铆钉，只保留一张大圆角暗面，hover 时整块微亮。
+   文字一律放大（1.34~1.52 倍），这也是"糊/小"问题的直接解法。 */
+const _btnH=Object.create(null), _btnX=Object.create(null);
+function button(id,label,x,y,w,h,fn,opt={}){const b={id,label,x,y,w,h,fn,disabled:!!opt.disabled,primary:!!opt.primary};buttons.push(b);
+  const hot=!b.disabled&&(inRect(pointer,b)||focusId===id);const gold=!!opt.primary;
+  /* 弹簧逼近 hover 进度（0=未选中，1=完全选中）。
+     注意：**不能**在这里清理失效按钮 —— 本帧 buttons 才刚开始填充，
+     那时会把上一帧的进度全清掉 ⇒ hover 永远到不了满值。清理在 rollButtons()。 */
+  const prev=_btnH[id]||0;_btnH[id]=MOTION.spring(prev,hot?1:0,1/60,14);
+  const hv=MOTION.reduced?(hot?1:0):_btnH[id];
+  const px=Math.round((MOTION.reduced?0:4)*hv);      /* 选中右移量（克制） */
+  if(opt.plain){
+    const on=hot||gold;
+    const mul=opt.big?1.94:1.74;
+    const col=b.disabled?C.inkFaint:on?C.gold:C.ink;
+    /* 裸文字在**高对比像素背景**（赛博朋克楼宇窗格）上会读不清。
+       解法不是压暗带（会糊掉背景），而是给文字加一圈**暗色描边**（见 text() 第 7 参）。 */
+    text(label,x+w/2+px,y+h/2,col,mul,1,'rgba(5,3,14,0.80)');
+    /* 选中标记：左侧一颗暖金菱点（尺寸随 hv 渐显），替代"按钮高亮块" */
+    if(!b.disabled&&hv>0.02){const ax=x+w/2-textW(label,mul)/2-20-px;
+      g.save();g.globalAlpha=Math.min(1,hv*1.25);
+      stud(ax+px,y+h/2);g.restore();}
+    return;}
+  const dy=hot?(pointer.down?2:-1):0;
+  const face=opt.disabled?C.well:hot?C.faceHot:gold?C.faceHot:C.face;
+  shadowRect(x,y+dy+2,w,h);
+  rrect(x,y+dy,w,h,10,face);
+  if(!opt.disabled)rrect(x+2,y+2+dy,w-4,h-4,8,hot?C.paperHi:C.paper);
+  /* 选中态：一道极短的金色顶缘，随 hv 渐显（替代旧版的上下双金线） */
+  if(hv>0.02&&w>20&&!opt.disabled)rect(x+Math.round(w*0.34),y+dy+1,Math.round(w*0.32*hv),2,C.gold);
+  if(opt.icon)icon(opt.icon,x+30+px,y+h/2+dy,1.42);
+  text(label,x+w/2+(opt.icon?12:0)+px,y+h/2+dy,opt.disabled?C.inkFaint:C.ink,1.34);}
+/* 整帧绘制结束后清理：删掉本帧不再出现的按钮的 hover 进度，
+   避免长会话里 map 无限增长（否则每进一个新界面都会留下旧 id）。 */
+function rollButtons(){for(const k in _btnH){let found=false;for(let i=0;i<buttons.length;i++)if(buttons[i].id===k){found=true;break;}if(!found)delete _btnH[k];}}
 function syncAccess(){const key=buttons.map(b=>b.id+'|'+b.x+'|'+b.y+'|'+b.w+'|'+b.h+'|'+b.disabled).join(';');if(key===screenKey)return;screenKey=key;access.replaceChildren();for(const b of buttons){const el=document.createElement('button');el.id=b.id;el.setAttribute('aria-label',b.label);el.title=b.label;el.disabled=b.disabled;el.style.cssText=`left:${b.x*scale}px;top:${b.y*scale}px;width:${b.w*scale}px;height:${b.h*scale}px`;el.onfocus=()=>focusId=b.id;el.onblur=()=>focusId='';el.onclick=()=>activate(b.id);access.appendChild(el);}}
 /* ---- 输入闸门：防止「界面切换瞬间的连点」穿透到下一层界面 ----
    触屏上这一点尤其明显：在旧界面按下、界面已换掉、手指抬起时落在新界面的
@@ -140,7 +416,11 @@ function gated(){
   gateUntil=Math.max(gateUntil,clock+GATE_BURST);
   return true;
 }
-function activate(id){const b=buttons.find(v=>v.id===id);if(!b||b.disabled||fxBusy||gated())return;AudioSystem.sfx('uiClick');pointer.down=false;b.fn();}
+function activate(id){const b=buttons.find(v=>v.id===id);if(!b||b.disabled||fxBusy||gated())return;sndUI('press');
+  /* 按下瞬间在**控件中心**炸开霓虹涟漪（视觉与听觉同帧确认）；键盘/焦点触发也在中心。
+     Ctrl/Cmd+点击视为"新标签打开"，不产生涟漪，避免误触感的视觉噪声。 */
+  if(!fxBusy&&b)ripple(b.x+b.w/2,b.y+b.h/2,b.primary?C.neonPink:C.neonViolet);
+  pointer.down=false;b.fn();}
 /* ---- 场景切换：状态落地 + shader 遮罩转场 ---- */
 let fxBusy=false;
 let Entering=false;   /* 正在进入关卡（防重入） */
@@ -155,12 +435,20 @@ function fxEdge(from,to){
 }
 function fxEnabled(){return !!(window.SceneFX&&SceneFX.enabled());}
 function applyState(state){Game.state=state;Game.transition=fxEnabled()?0:1;screenKey='';focusId='';Play.keys={};const gaming=['playing','pause','win','fail'].includes(state);D.playScreen.classList.toggle('active',gaming);Play.active=gaming;
+  /* 记录本界面的"出场时刻"：差动入场（staggerBlock）与面板扫光都以它为基准 */
+  _pageT0=clock;
+  /* 回到启动页时重置开机序列（正常流程只会经历一次，这里是防御性处理） */
+  if(state==='boot'){_bootT0=-1;_bootSkip=false;bootArmed=false;}
   /* 落地新界面后开启输入闸门：局外页面切换用 UI 时长，进出关卡用稍长的时长。
      局内（playing 且来源也是局内）不加闸门，保持操作灵敏。 */
   gateNow(state==='playing'?GATE_ENTER:GATE_UI);
   /* 局内（playing/win/fail）保持关卡音乐连续（不因结算页而硬切到菜单主题，避免突兀）；
-     仅 pause→pause 主题、quit→静音、其余页面→菜单主题。 */
-  AudioSystem.setScene((state==='playing'||state==='win'||state==='fail')?'level':state==='pause'?'pause':state==='quit'?'silent':'menu',Game.levels[Game.selected]?.lv);}
+     仅 pause→pause 主题、quit→静音、其余页面→菜单主题。
+     ★BOSS 战期间必须保持 BOSS 主题★：否则「暂停 → 继续」会把场景强制切回 'level'，
+     而 runtime 的幂等闩锁 `Play._bossBgmOn` 仍是 true ⇒ `_pbossBgm(true)` 被拦下，
+     本场战斗再也听不到 BOSS 曲（`_bugscan.cjs` 实证：onResume=['level'] 且闩锁卡死）。 */
+  const _bossAwake=(typeof Play!=='undefined'&&Play&&Play.boss&&Play.boss.state==='awake');
+  AudioSystem.setScene((state==='playing'||state==='win'||state==='fail')?(_bossAwake?'boss':'level'):state==='pause'?'pause':state==='quit'?'silent':'menu',Game.levels[Game.selected]?.lv);}
 function change(state,opts){opts=opts||{};
   const from=Game.state;
   /* 只有跨越页面（进出选关页）的切换才播遮罩转场；其余瞬时切换。
@@ -184,9 +472,21 @@ async function begin(i){if(!Game.levels[i]||!unlocked(i)||Entering)return;Enteri
       const guard=new Promise(r=>setTimeout(r,900));await Promise.race([p,guard]);if(window.Loading)Loading.setProgress(0.95);
       if(window.Loading){Loading.done();await Loading.waitMin();}
     }
-    Game.elapsed=0;Game.simTime=0;Game.hearts=[];Game.newBest=false;LevelContext.levels=Game.levels.map(r=>r.lv);LevelContext.currentIdx=i;FEEL=sanitizeFeel(lv.feel);
-    /* 真正“落地”到关卡：重建局内状态并显示游戏画面。必须在遮罩全遮时调用。 */
-    const doEnter=()=>{applyState('playing');startPlay();updateCamera(Play.cam,Play.player,Play.worldBounds,Play.camOffset);AudioSystem.setListener(Play.player);AudioSystem.sfx('respawn');acc=0;if(window.Loading)Loading.hide();};
+    Game.elapsed=0;Game.simTime=0;Game.hearts=[];Game.newBest=false;
+    /* ★LevelContext.levels 必须是「稀疏数组」★
+       runtime 只在 5 处访问它，且**全部都是 levels[currentIdx]**（已核实：
+       runtime.js 4215 / 5210 / 5318 / 5350 / 5408）。
+       所以这里不能 `.map(r=>r.lv)` —— 那会把 1000 关全展开。
+       改为放一个稀疏数组，只在 currentIdx 位置放入当前关卡
+       （runtime 用 `if(!lv)return;` 守卫缺失项，稀疏是安全的）。 */
+    if(!LevelContext.levels||LevelContext.levels.length!==Game.levels.length){
+      LevelContext.levels=new Array(Game.levels.length);}
+    LevelContext.levels[i]=lv;LevelContext.currentIdx=i;FEEL=sanitizeFeel(lv.feel);
+    /* 真正“落地”到关卡：重建局内状态并显示游戏画面。必须在遮罩全遮时调用。
+       ★进关前先清掉上一关残留的 BOSS 音乐状态★：`applyState` 会按 `Play.boss`
+       决定用 boss 还是 level 主题；若上一关的 BOSS 还停在 awake（例如暂停后退出到
+       菜单、再进新关），不清就会让新关一进来就放 BOSS 曲。`startPlay` 随后重建 boss。 */
+    const doEnter=()=>{if(typeof Play!=='undefined'&&Play){Play.boss=null;Play._bossBgmOn=false;}applyState('playing');startPlay();updateCamera(Play.cam,Play.player,Play.worldBounds,Play.camOffset);AudioSystem.setListener(Play.player);AudioSystem.sfx('respawn');acc=0;if(window.Loading)Loading.hide();};
     /* 从页面（选关/胜负页）进入游戏 = 页面级切换 → 播一次遮罩转场。
        关键：遮罩必须在“旧页面仍然可见”时就铺开，并在全遮的瞬间才切到关卡
        （onSwap 回调），否则会先看到关卡场景、再被遮罩扫过，逻辑反了。
@@ -198,171 +498,559 @@ async function begin(i){if(!Game.levels[i]||!unlocked(i)||Entering)return;Enteri
 }
 function pause(){if(Game.state==='playing')change('pause');else if(Game.state==='pause'){change('playing');AudioSystem.update(Play.player,Play,0);}}
 function victory(){if(Game.state!=='playing')return;const r=Game.levels[Game.selected],old=Game.save.best[r.key];Game.newBest=!Number.isFinite(old)||Game.elapsed<old;Game.save.best[r.key]=Math.min(old??Infinity,Game.elapsed);Game.save.completed[r.key]=true;persist();change('win');AudioSystem.sfx('win');}
-function resetProgress(){Game.save={completed:{},best:{},trophies:{},music:.6,sfx:.8};persist();AudioSystem.setVolumes(.6,.8);change('settings');notify('存档已清空');}
-function slider(id,label,x,y,w,val,set){textLeft(label,x,y,C.ink);const bar={x:x+112,y:y-10,w,h:20};buttons.push({id,label:label+' '+Math.round(val*100)+'%',...bar,slider:true,fn:()=>set(Math.max(0,Math.min(1,(pointer.x-bar.x)/w)))});
-  rect(bar.x-2,bar.y+4,w+4,12,C.line);rect(bar.x,bar.y+6,w,8,'#fdf8e6');rect(bar.x,bar.y+6,w,2,'#cbbf9e');
-  const fill=w*val;if(fill>1){rect(bar.x,bar.y+6,fill,8,C.gold);rect(bar.x,bar.y+6,fill,3,C.goldHi);}
-  rect(bar.x+fill-7,bar.y,14,20,C.line);rect(bar.x+fill-5,bar.y+2,10,16,C.goldHi);rect(bar.x+fill-3,bar.y+4,2,12,'#fffdf0');
-  text(Math.round(val*100)+'%',bar.x+w+54,y+6,C.inkSoft,1.05);if(dragSlider===id)set(Math.max(0,Math.min(1,(pointer.x-bar.x)/w)));}
+function resetProgress(){Game.save={completed:{},best:{},trophies:{},music:.6,sfx:.8,crt:true,crtScan:true,crtCurve:.45};persist();AudioSystem.setVolumes(.6,.8);if(window.CRT)CRT.setCurve(.45),CRT.sync(true);change('settings');notify('存档已清空');}
+function slider(id,label,x,y,w,val,set){textLeft(label,x,y,C.inkSoft,1.14);const bar={x:x+118,y:y-10,w,h:22};buttons.push({id,label:label+' '+Math.round(val*100)+'%',...bar,slider:true,fn:()=>set(Math.max(0,Math.min(1,(pointer.x-bar.x)/w)))});
+  rrect(bar.x,bar.y+6,w,10,5,C.well);
+  const fill=w*val;if(fill>1){rrect(bar.x,bar.y+6,fill,10,5,C.gold);rect(bar.x+3,bar.y+8,Math.max(1,fill-6),3,C.goldHi);}
+  rrect(bar.x+fill-8,bar.y,16,22,8,C.goldHi);rect(bar.x+fill-4,bar.y+4,3,14,'#fffdf0');
+  text(Math.round(val*100)+'%',bar.x+w+58,y+6,C.ink,1.20);if(dragSlider===id)set(Math.max(0,Math.min(1,(pointer.x-bar.x)/w)));}
 function setVol(k,v){Game.save[k]=v;AudioSystem.setVolumes(Game.save.music,Game.save.sfx);persist();}
-function keyboard(key,x,y,w=54,fs=1.05){shadowRect(x,y,w,31);rect(x,y,w,31,C.lineLo);rect(x+2,y+2,w-4,27,C.line);rect(x+4,y+4,w-8,23,'#fffdf2');rect(x+6,y+6,w-12,3,'#ffffff');rect(x+4,y+25,w-8,2,'#cfc4a4');text(key,x+w/2,y+14,C.ink,fs);}
+function keyboard(key,x,y,w=54,fs=1.05){rrect(x,y,w,32,8,C.well);text(key,x+w/2,y+15,C.inkSoft,fs);}
 
-/* ------------------------------------------------------ 天空 · 群山 · 光扫 */
-/* 性能关键：静态图层（天空/太阳/群山/森林/遗迹/山丘/草地/暗角）只烘焙一次到离屏画布，
-   每帧仅重绘动态的云与光束。全量重绘约 320ms/帧，现降到 1~3ms/帧。 */
+/* ------------------------------------------------------ 夜空 · 群山 · 月光 */
+/* 性能关键：静态图层（夜空/明月/星野/银河/群山/森林/遗迹/山丘/地面/暗角）只烘焙一次到
+   离屏画布，每帧仅重绘动态的薄云、月光束。全量重绘约 320ms/帧，现降到 1~3ms/帧。
+
+   ⚠️ WS-B v3 设计变更：**不再用"亮蓝天 + 半透明黑纱"**。
+   参考（动物井 / 空洞骑士 / 闰跃之年）的高级感来自「整幅画面本身就画在暗色域里」，
+   而不是给亮图盖一层纱 —— 盖纱会把插画压成灰糊底，还要露出原来的亮蓝天，
+   两头不讨好。因此这里直接重绘一套**原生暗色夜景**：深靛夜空 + 冷月 + 星野 +
+   剪影群山，层级全靠**明度压缩**表达（近处最暗，远处略亮），与参考同法。 */
 const sceneCanvas=document.createElement('canvas');sceneCanvas.width=480;sceneCanvas.height=300;const sg=sceneCanvas.getContext('2d');
 const _skyBG=document.createElement('canvas');_skyBG.width=480;_skyBG.height=300;
-const _skyTerrain=document.createElement('canvas');_skyTerrain.width=480;_skyTerrain.height=300;
 const _skyVig=document.createElement('canvas');_skyVig.width=480;_skyVig.height=300;
 let _skyBaked=false;const _cloudSprites=new Map();
+/* ---------- WS-B v4：赛博朋克夜景 · 调色与工具 ----------
+   混合模式只允许用 **multiply / destination-in** —— 它们不会抬起透明像素的 alpha。
+   `screen`（可分离混合模式）会把 alpha=0 的区域也点亮，精灵立刻显出一块矩形底板。 */
+function _nightGrade(cv,strength){
+  const w=cv.width,h=cv.height,q=cv.getContext('2d');q.save();
+  q.globalCompositeOperation='multiply';
+  const gr=q.createLinearGradient(0,0,0,h);
+  gr.addColorStop(0,'#3a2260');gr.addColorStop(.55,'#4a2a6e');gr.addColorStop(1,'#5b3a80');
+  q.globalAlpha=strength;q.fillStyle=gr;q.fillRect(0,0,w,h);q.restore();}
+function _gradeSprite(cv,strength){
+  const m=document.createElement('canvas');m.width=cv.width;m.height=cv.height;
+  m.getContext('2d').drawImage(cv,0,0);
+  _nightGrade(cv,strength);
+  const q=cv.getContext('2d');q.save();q.globalCompositeOperation='destination-in';q.drawImage(m,0,0);q.restore();}
+/* 雾团：像素云原语调成暗紫，靠 multiply 压进夜色（云顶自然受光，无需画边） */
 function _cloudSprite(w,h){w=Math.round(w);h=Math.round(h);const key=w+'x'+h;let s=_cloudSprites.get(key);if(s)return s;
-  s=document.createElement('canvas');s.width=w+8;s.height=h+10;const c=s.getContext('2d');
-  _psCloud(c,4,8,w,h,'#bfe0f2','#6f9dc0',1);
-  _psCloud(c,7,1,Math.round(w*.74),Math.round(h*.62),'#ffffff','#a9c6da',1);
-  c.fillStyle='rgba(255,246,214,0.55)';c.fillRect(6,6,Math.round(w*.5),2);
-  s._ox=4;s._oy=8;_cloudSprites.set(key,s);return s;}
+  s=document.createElement('canvas');s.width=w+8;s.height=h+16;
+  const lay=document.createElement('canvas');lay.width=s.width;lay.height=s.height;const q=lay.getContext('2d');
+  _psCloud(q,4,12,w,h,'#6b5a9e','#3a2a60',1);
+  _gradeSprite(lay,0.94);
+  s.getContext('2d').drawImage(lay,0,0);
+  s._ox=4;s._oy=10;_cloudSprites.set(key,s);return s;}
 function _bakeSky(){
   const c=_skyBG.getContext('2d');
+  /* ===== WS-B v4：赛博朋克雨夜 =====
+     美术语言：**暗紫夜空 + 霓虹塔楼天际线 + 光污染辉光 + 雨丝**。
+     参考对象是《赛博朋克 2077》《Blade Runner》《VA-11 HALL-A》的夜景构成，
+     但保持像素语言（塔楼窗格是 2×2 像素、招牌是横向像素条）。
+     分层顺序：天空渐变 → 光污染辉光 → 远塔 → 近塔（含霓虹招牌）→ 地面水洼反光。
+     所有"霓虹"都刻意只用低饱和的冷紫 / 青 / 品红三种，避免花成圣诞树。 */
+  const NEO=['#ff4d9d','#22d3ee','#a78bfa','#f472b6','#38bdf8'];
   const gr=c.createLinearGradient(0,0,0,300);
-  gr.addColorStop(0,'#2f8fe0');gr.addColorStop(.30,'#5fb0ea');gr.addColorStop(.58,'#9fd4f0');gr.addColorStop(.82,'#d9ecf4');gr.addColorStop(1,'#f6f0d2');
+  gr.addColorStop(0,'#0a0618');gr.addColorStop(.30,'#140c2c');
+  gr.addColorStop(.58,'#221444');gr.addColorStop(.80,'#341c56');gr.addColorStop(1,'#4a2560');
   c.fillStyle=gr;c.fillRect(0,0,480,300);
-  const sunX=368,sunY=58,glow=c.createRadialGradient(sunX,sunY,0,sunX,sunY,160);
-  glow.addColorStop(0,'rgba(255,252,224,1)');glow.addColorStop(.14,'rgba(255,240,170,0.62)');glow.addColorStop(.42,'rgba(255,214,120,0.24)');glow.addColorStop(1,'rgba(255,200,110,0)');
-  c.fillStyle=glow;c.fillRect(sunX-160,sunY-160,320,320);
-  c.fillStyle='#fffbdc';c.fillRect(sunX-12,sunY-12,24,24);c.fillStyle='#fff4b4';c.fillRect(sunX-16,sunY-7,32,14);c.fillRect(sunX-7,sunY-16,14,32);
-  const tc=_skyTerrain.getContext('2d');
-  for(let i=0;i<5;i++)_psMountain(tc,i*123-70,74+(i%2)*8,196,150,'#7fa8c4','#5b86a8',1);
-  for(let i=0;i<6;i++)_psMountain(tc,i*101-48,106+(i%3)*9,172,146,'#5b86a8','#41688c',1);
-  _psPineForest(tc,-24,170,300,102,'#3f7a63','#2a5a4c',1);_psPineForest(tc,250,168,280,100,'#3f7a63','#2a5a4c',1);
-  _psRuins(tc,54,198,120,80,'#6e8f9e','#4d6f85',1);_psTower(tc,330,180,54,96,'#6e8f9e','#4d6f85',1);
-  _psHill(tc,-40,252,320,102,'#79b46a','#4e8c52',1);_psHill(tc,202,248,346,102,'#82bd6e','#548c55',1);
-  tc.fillStyle='#6ba85e';tc.fillRect(0,286,480,14);
-  for(let i=0;i<480;i+=3){tc.fillStyle=i%2?'#a9d788':'#4d8347';tc.fillRect(i,284+(i%5),2,4);}
+  /* 光污染：地平线附近的三团大范围霓虹辉光 —— 赛博夜景"空气里有光"的关键 */
+  [[96,'#7c3aed',.30],[268,'#e0398a',.24],[398,'#0ea5e9',.20]].forEach(([gx,gcol,ga])=>{
+    const gg=c.createRadialGradient(gx,258,4,gx,258,190);
+    gg.addColorStop(0,`${gcol}`);gg.addColorStop(1,'rgba(0,0,0,0)');
+    c.save();c.globalAlpha=ga;c.fillStyle=gg;c.fillRect(gx-190,68,380,380);c.restore();});
+  /* 星野：赛博夜空的星比自然夜空更稀（光污染冲淡）—— 只留 90 颗 */
+  for(let i=0;i<90;i++){
+    const s1=_pr(i*2.7+1),s2=_pr(i*5.1+9),s3=_pr(i*3.3+17);
+    c.fillStyle=`rgba(216,226,255,${(0.12+0.48*s3).toFixed(3)})`;
+    c.fillRect(Math.round(s1*480),Math.round(s2*s2*150),s3>.94?2:1,s3>.94?2:1);}
+  /* ---------- 塔楼生成器 ----------
+     每栋楼：主体暗紫 → 左侧受霓虹侧光（1px 亮边）→ 窗格（亮 / 灭随机，
+     靠 `_pr` 确定性决定，且有 8% 的"闪烁窗"在逐帧里单独点）→ 部分楼顶加霓虹招牌横条。 */
+  const tower=(x,w,h,seed,depth)=>{
+    const top=300-h;
+    const body=depth===0?'#120a22':depth===1?'#160e2c':'#0d0719';
+    c.fillStyle=body;c.fillRect(x,top,w,h);
+    /* 左侧受光边：远处塔楼被身后霓虹照亮 */
+    c.fillStyle=depth===0?'rgba(167,139,250,0.34)':'rgba(124,58,237,0.22)';
+    c.fillRect(x,top,1,h);
+    c.fillStyle='rgba(0,0,0,0.26)';c.fillRect(x+w-1,top,1,h);
+  /* 窗格：3×2 像素、行距 7、列距 6（比第一版稀一倍）——
+     赛博朋克夜景的高级感来自"大面积暗楼 + 稀疏窗光"，
+     窗太密会变成一张"星空地毯"，反而糊掉天际线轮廓。 */
+    const litCols=NEO[Math.floor(_pr(seed*3.7)*NEO.length)];
+    const off=depth===0?0.66:depth===1?0.78:0.88;
+    c.fillStyle='rgba(255,238,180,0.92)';
+    for(let wy=top+5;wy<294;wy+=7){
+      for(let wx=x+4;wx<x+w-4;wx+=6){
+        const r=_pr(wx*1.7+wy*3.1+seed*13);
+        if(r<off)continue;
+        if(r>0.965){c.fillStyle=litCols;}else if(r>0.925){c.fillStyle='rgba(180,220,255,0.72)';}
+        else{c.fillStyle='rgba(255,230,158,0.78)';}
+        c.fillRect(wx,wy,3,2);}}
+    /* 楼顶霓虹招牌：横向短条（赛博朋克的城市名片）。只有少数楼有，避免"招牌森林" */
+    if(_pr(seed*7.3)>0.80){const sw=Math.min(w-4,Math.round(w*(0.42+_pr(seed*2.1)*0.4)));
+      const sx=x+Math.round((w-sw)/2),sc=NEO[Math.floor(_pr(seed*5.9)*NEO.length)];
+      c.save();c.globalAlpha=.80;c.fillStyle=sc;c.fillRect(sx,top-7,sw,2);
+      c.globalAlpha=.26;c.fillRect(sx-2,top-9,sw+4,6);c.restore();}
+    /* 天线 + 顶端航空警示灯（红点，逐帧闪） */
+    if(_pr(seed*4.4)>0.74){c.fillStyle='#241a3c';c.fillRect(x+Math.round(w/2)-1,top-16,2,16);
+      c.save();c.globalAlpha=.9;c.fillStyle='#ff3355';c.fillRect(x+Math.round(w/2)-1,top-18,2,2);c.restore();}
+  };
+  /* 远景塔群（矮、暗、窗少）→ 中景（高、亮）→ 近景（最高、最暗、只作剪影） */
+  let sd=11;for(let x=-10;x<490;){const w=22+Math.round(_pr(sd*1.3)*26);tower(x,w,66+Math.round(_pr(sd*2.7)*54),sd,2);x+=w+3+Math.round(_pr(sd*3.1)*7);sd++;}
+  sd=71;for(let x=-14;x<490;){const w=30+Math.round(_pr(sd*1.7)*34);tower(x,w,104+Math.round(_pr(sd*2.3)*78),sd,1);x+=w+5+Math.round(_pr(sd*3.9)*10);sd++;}
+  sd=131;for(let x=-20;x<490;){const w=40+Math.round(_pr(sd*1.9)*44);tower(x,w,138+Math.round(_pr(sd*2.9)*92),sd,0);x+=w+8+Math.round(_pr(sd*4.3)*14);sd++;}
+  /* 近景剪影：两栋贴脸的黑塔 + 空调外机方块，把画面压住（不点火，纯暗） */
+  c.fillStyle='#0b0718';c.fillRect(-6,150,74,150);
+  c.fillStyle='#0e0920';c.fillRect(404,124,86,176);
+  c.fillStyle='#150e28';for(let k=0;k<5;k++)c.fillRect(20,196+k*26,12,8);
+  c.fillStyle='#170f2c';c.fillRect(416,150,24,16);c.fillRect(452,206,22,14);
+  /* 地面：湿沥青 + 霓虹倒影（倒影用竖向拖尾的极淡色条，像素里读作"积水反光"） */
+  c.fillStyle='#0a0616';c.fillRect(0,282,480,18);
+  c.save();c.globalAlpha=.30;
+  [[96,'#7c3aed'],[268,'#e0398a'],[398,'#0ea5e9']].forEach(([gx,gcol])=>{const rg=c.createLinearGradient(0,282,0,300);
+    rg.addColorStop(0,gcol);rg.addColorStop(1,'rgba(0,0,0,0)');c.fillStyle=rg;c.fillRect(gx-30,282,60,18);});
+  c.restore();
+  c.save();c.globalAlpha=.22;c.fillStyle='#d8b4fe';
+  for(let i=0;i<40;i++){const r=_pr(i*2.3);if(r<.6)continue;c.fillRect(Math.round(_pr(i*3.7)*480),283+Math.round(_pr(i*5.1)*14),1+Math.round(_pr(i*7.3)*2),1);}
+  c.restore();
+  /* 暗角：冷紫，压边不压中 */
   const vc=_skyVig.getContext('2d');
-  const vig=vc.createRadialGradient(240,150,110,240,150,340);
-  vig.addColorStop(0,'rgba(0,0,0,0)');vig.addColorStop(.70,'rgba(32,64,96,0.10)');vig.addColorStop(1,'rgba(24,52,84,0.30)');
+  const vig=vc.createRadialGradient(240,150,110,240,150,344);
+  vig.addColorStop(0,'rgba(0,0,0,0)');vig.addColorStop(.66,'rgba(8,4,18,0.18)');vig.addColorStop(1,'rgba(4,2,12,0.52)');
   vc.fillStyle=vig;vc.fillRect(0,0,480,300);
   _skyBaked=true;}
-function sky(){const t=clock;if(!_skyBaked)_bakeSky();
+/* 场景合成：把 480×300 的赛博夜景合成为一张图（PC 与手机版**共用**这一段）。
+   手机版只需按竖屏的缩放/裁切方式把它贴出去，不必复制一份着色源码 ——
+   这样两版永远同一色系，不会再出现"手机版是暖色、电脑版是冷色"的漂移。 */
+function _composeScene(t){
+  if(!_skyBaked)_bakeSky();
   sg.setTransform(1,0,0,1,0,0);sg.clearRect(0,0,480,300);
   sg.drawImage(_skyBG,0,0);
-  /* 云：唯一逐帧位移的图层，使用预烘焙精灵，代价极低 */
-  for(let i=0;i<9;i++){const x=((i*97+t*(1.1+(i%4)*.75))%640)-140,y=20+(i%4)*32,w=92+(i%3)*48,h=36+(i%2)*14;
+  /* 低空雾团：暗紫、少而小，慢速横移（赛博夜景的雾，不是白天的云） */
+  for(let i=0;i<5;i++){const x=((i*151+t*(.60+(i%3)*.44))%720)-180,y=150+(i%3)*36,w=90+(i%3)*34,h=30+(i%2)*12;
     const sp=_cloudSprite(w,h);sg.drawImage(sp,Math.round(x-sp._ox),Math.round(y-sp._oy));}
-  sg.drawImage(_skyTerrain,0,0);
-  /* 缓慢横扫的阳光光束（程序化光影 shader 观感） */
-  const center=(Math.sin(t*.055)*.5+.5)*700-110;
-  for(let x=0;x<480;x+=3){const d=(x-center)/115;const beam=Math.exp(-(d*d));if(beam<.004)continue;sg.fillStyle=`rgba(255,250,214,${(beam*.30).toFixed(3)})`;sg.fillRect(x,0,3,300);}
+  /* 霓虹辉光扫动：三盏大范围色光缓慢左右漂移，让塔楼"被光扫过"（这是动态感的主要来源） */
   sg.save();sg.globalCompositeOperation='screen';
-  sg.beginPath();sg.moveTo(384,0);sg.lineTo(424,0);sg.lineTo(206+Math.sin(t*.07)*36,300);sg.lineTo(60+Math.sin(t*.07)*36,300);sg.fillStyle='rgba(255,244,196,0.15)';sg.fill();
-  sg.beginPath();sg.moveTo(292,0);sg.lineTo(318,0);sg.lineTo(116+Math.sin(t*.05)*26,300);sg.lineTo(14+Math.sin(t*.05)*26,300);sg.fillStyle='rgba(255,232,168,0.10)';sg.fill();
+  [[96,'167,58,237'],[268,'224,57,138'],[398,'14,165,233']].forEach(([gx,rgb],i)=>{
+    const cx=gx+Math.sin(t*(.09+i*.035)+i*2.1)*46;
+    const gg=sg.createRadialGradient(cx,250,2,cx,250,150);
+    gg.addColorStop(0,`rgba(${rgb},0.16)`);gg.addColorStop(1,`rgba(${rgb},0)`);
+    sg.fillStyle=gg;sg.fillRect(cx-150,100,300,300);});
   sg.restore();
-  sg.drawImage(_skyVig,0,0);
+  /* 雨：斜向雨丝（逐帧位置由 clock 推函数算出，不累积状态 ⇒ 掉帧不错位）。
+     分两档：细密小雨 + 少量长雨，只有 60+26 条，代价可忽略。 */
+  sg.save();sg.globalAlpha=.34;sg.fillStyle='#cbb6ff';
+  for(let i=0;i<60;i++){
+    const s1=_pr(i*1.7),s2=_pr(i*3.1+5),s3=_pr(i*5.3+11);
+    const span=340, y=((s1*span+t*(210+s2*180))%span)-40;
+    const x=((s2*520+t*(58+s3*46))%540)-30;
+    sg.fillRect(Math.round(x),Math.round(y),1,2+Math.round(s3*4));}
+  sg.globalAlpha=.50;sg.fillStyle='#e6dcff';
+  for(let i=0;i<26;i++){
+    const s1=_pr(i*2.9+61),s2=_pr(i*4.7+83),s3=_pr(i*6.1+97);
+    const span=340, y=((s1*span+t*(300+s2*220))%span)-40;
+    const x=((s2*520+t*(70+s3*54))%540)-30;
+    sg.fillRect(Math.round(x),Math.round(y),1,7+Math.round(s3*9));}
+  sg.restore();
+  /* 塔楼窗的闪烁：只在**整屏静态塔图之上**补少量随机亮点（每帧 6 个），
+     代价极低却让"城市是活的"——这是赛博夜景最廉价有效的动态。 */
+  sg.save();
+  for(let i=0;i<6;i++){
+    const s=_pr(Math.floor(t*7)*13.7+i*29.3);
+    const x=8+Math.round(_pr(i*7.1+Math.floor(t*7)*3.3)*464);
+    const y=140+Math.round(_pr(i*11.3+Math.floor(t*7)*5.7)*132);
+    sg.fillStyle=s>.5?'rgba(255,238,180,0.85)':'rgba(167,139,250,0.75)';
+    sg.fillRect(x,y,2,2);}
+  sg.restore();
+}
+function sky(){_composeScene(clock);
   g.imageSmoothingEnabled=false;g.drawImage(sceneCanvas,0,0,W,H);}
-/* 标题：不使用背景板，仅靠加大字号 + 金色渐变 + 粗描边保证清晰 */
-function titleBlock(cx,cy,k){styledText('拼 死 跳 跃',cx,cy-Math.round(14*k),k*2.05,['#ffffff','#ffe98a','#e8a92c','#96630e'],3.4,0.25);renderSubtitle(cx,cy+Math.round(46*k),k);}
+/* 霓虹全息圆环：启动页与菜单的"主题图形"。
+   一圈沿圆周分布的霓虹点 + 每点外扩的辉光 + 缓慢自转 —— 呼应"死亡留下幽灵"的环形回响。 */
+function holoRing(cx,cy,r,alpha){
+  if(alpha<=.01)return;const t=clock;
+  g.save();g.globalAlpha=alpha;
+  g.globalCompositeOperation='lighter';
+  for(let i=0;i<56;i++){
+    const a=i/56*Math.PI*2+t*.22;
+    const rr=r+Math.sin(i*1.7+t*1.6)*2.4;
+    const px=cx+Math.cos(a)*rr,py=cy+Math.sin(a)*rr*0.42;
+    const s=0.35+0.65*(0.5+0.5*Math.sin(i*2.3-t*2.1));
+    const col=i%3===0?'#ff4d9d':i%3===1?'#22d3ee':'#a78bfa';
+    g.globalAlpha=alpha*(0.30+0.55*s);
+    g.fillStyle=col;g.fillRect(Math.round(px),Math.round(py),2,2);}
+  g.restore();}
+/* 标题：参考六款游戏的做法 —— **只用字**，不做渐变描边浮雕。
+   改为"近白墨字 + 一层极淡的深色投影"，靠字号与留白立住，而不是靠描边撑。
+   标题背后叠一圈**霓虹全息环**（呼应"死亡留下幽灵"的环形回响），作为主题图形。 */
+function titleBlock(cx,cy,k){holoRing(cx,cy-Math.round(6*k),Math.round(168*k),0.60);
+  styledText('拼 死 跳 跃',cx,cy-Math.round(12*k),k*2.42,TITLE_COL,2.6,0.25);renderSubtitle(cx,cy+Math.round(56*k),k);}
 function renderSubtitle(cx,cy,k){const label='D I E   T O   J U M P';
-  /* 与主标题同源的渐变描边，无背景板；两侧红色短线作点缀 */
   const bw=Math.round(300*k);
-  styledText(label,cx,cy,Math.max(1,1.18*k),['#ffffff','#ffe98a','#e8a92c','#96630e'],2.2,0.25);
-  rect(cx-bw/2-44,cy-2,14,4,C.red);rect(cx+bw/2+30,cy-2,14,4,C.red);}
+  text(label,cx,cy,C.inkSoft,Math.max(.9,1.05*k));
+  rect(cx-bw/2-40,cy-1,16,2,'rgba(255,77,157,0.80)');rect(cx+bw/2+24,cy-1,16,2,'rgba(34,211,238,0.80)');}
+/* 标题配色：近白 → 极淡暖白，几乎不渐变（渐变越弱越"高级"） */
+const TITLE_COL=['#ffffff','#fdfaf0','#f4e6c2','#e9d9ad'];
 
 /* ------------------------------------------------------------- 启动 / 主菜单 */
+/* 启动页的「开机时间线」：以首次进入 boot 的时刻为 0，各元素按时序淡入。
+   总时长 1.55s（调研建议 1.2~1.8s），任意输入可跳过 —— 跳过不是“瞬间显示”，
+   而是把时间线快进到末尾，仍然完成一次干净的淡入，观感不突兀。
+   PC 与手机版共用这一条时间线（手机版 boot 由 mobile-ui.js 覆写，但复用本函数）。 */
+let _bootT0=-1,_bootSkip=false;
+const BOOT_T={logo:0.05,sub:0.34,line:0.62,tag:0.80,hint:1.05,ver:1.30,end:1.55};
+function bootProgress(){
+  if(_bootT0<0)_bootT0=clock;
+  const t=(_bootSkip?BOOT_T.end:clock-_bootT0);
+  const EN=(s,d)=>{const k=MOTION.at(s,t,d);return MOTION.reduced?k:MOTION.easeOut(k);};
+  return{raw:t,logo:EN(BOOT_T.logo,.50),sub:EN(BOOT_T.sub,.38),line:EN(BOOT_T.line,.34),
+         tag:EN(BOOT_T.tag,.44),hint:EN(BOOT_T.hint,.42),ver:EN(BOOT_T.ver,.50),vig:Math.max(.18,Math.min(1,EN(0,.9)))};
+}
+/* 启动页的公共层（标题/副标题/分隔线/标语/提示/版本号/暗角），PC 与手机版共用。
+   传入 H 相关位置用比例表达，两版即使画布尺寸不同也能保持同一构图比例。 */
+function bootCommon(L,cy,W2,H2,opt){
+  opt=opt||{};
+  const hintY=opt.hintY==null?H2*.82:opt.hintY, hintS=opt.hint||'按 任 意 键 开 始';
+  const dy=MOTION.reduced?0:(1-L.logo)*10;
+  /* 标题放大后必须同步拉开后续元素间距，否则副标题会被标题下缘压住（实测 2.64 倍时重叠 8px）。 */
+  if(L.logo>0){g.save();g.globalAlpha=L.logo;styledText('拼 死 跳 跃',W2,cy-H2*.070+dy,2.64,TITLE_COL,1.6,0.25);g.restore();}
+  const sw=(L.raw-0.28)/0.45;
+  if(sw>0&&sw<1&&!MOTION.reduced){const x0=W2-280+560*sw;g.save();g.globalAlpha=.42*Math.sin(sw*Math.PI);
+    rect(x0-30,cy-H2*.070-34,30,68,'rgba(255,255,255,.42)');g.restore();}
+  if(L.sub>0){g.save();g.globalAlpha=L.sub;text('D I E   T O   J U M P',W2,cy+H2*.012+((MOTION.reduced?0:(1-L.sub)*8)),C.inkSoft,1.20,1,'rgba(5,3,14,0.75)');g.restore();}
+  if(L.line>0){g.save();g.globalAlpha=L.line;const lw=Math.round(W2*.26*L.line);rect(W2-lw/2,cy+H2*.052,lw,1,'rgba(255,77,157,0.46)');g.restore();}
+  if(L.tag>0){g.save();g.globalAlpha=L.tag;text('每一次陨落，都是下一次起跳的回响',W2,cy+H2*.094+((MOTION.reduced?0:(1-L.tag)*6)),C.inkSoft,1.02,1,'rgba(5,3,14,0.72)');g.restore();}
+  if(L.hint>0){const pulse=.40+.60*(.5+.5*Math.sin(clock*2.2));g.save();g.globalAlpha=pulse*L.hint;
+    text(hintS,W2,hintY,C.ink,1.34,1,'rgba(5,3,14,0.78)');g.restore();}
+  if(L.ver>0){const v=opt.version||'v1.0 · 独立游戏版';
+    g.save();g.globalAlpha=.40*L.ver;if(opt.versionCenter)text(v,W2,opt.versionY==null?H2-16:opt.versionY,C.inkFaint,.82);else textRight(v,W2-20,H2-16,C.inkFaint,.82);g.restore();}
+  if(L.vig>.02){g.save();g.globalAlpha=.44*L.vig;const gr=g.createRadialGradient(W2,H2*.44,H2*.20,W2,H2*.44,H2*.98);
+    gr.addColorStop(0,'rgba(0,0,0,0)');gr.addColorStop(1,'rgba(6,2,16,0.74)');g.fillStyle=gr;g.fillRect(0,0,W2,H2);g.restore();}
+}
+/* 浮尘粒子：局外界面（菜单/选关）的“空气感”。位置由 clock 纯函数推出，
+   不累积状态 ⇒ 掉帧不会错位；预算固定 26 颗 × 2 次 fillRect，代价可忽略。 */
+function motes(cx0,cy0,cw,ch,n,seed){
+  const a=clock*0.5;
+  for(let i=0;i<n;i++){
+    const s=_pr(seed+i*3.7),s2=_pr(seed+i*7.1+11),s3=_pr(seed+i*5.3+23);
+    const x=cx0+((s*cw+a*(6+s2*16))%(cw));
+    const y=cy0+((s2*ch - a*(8+s3*22))%ch+ch)%ch;
+    const tw=.22+.5*(.5+.5*Math.sin(clock*(1.1+s3*1.6)+i));
+    const r=s3>.86?2:1;
+    rect(x,y,r,r,`rgba(216,180,254,${(tw*.46).toFixed(3)})`);
+  }
+}
 let bootArmed=false;
 async function startGame(){if(Game.state!=='boot'||bootArmed)return;bootArmed=true;
-  /* 菜单 BGM 与音频解锁**并行**等待：启动预热通常已把 menu 轨算好（缓存命中立即返回）；
-     万一没赶上，就等它算完再切页面，避免“进了主菜单但音乐要等一阵才响”。
-     用 Promise.race 限制上限，极端情况也不至于卡住开始流程。 */
-  const warmMenu=Promise.resolve().then(()=>{
-    if(AudioSystem&&AudioSystem.ensureTrack)return AudioSystem.ensureTrack('menu',null);
-  }).catch(()=>{});
-  await Promise.all([AudioSystem.init(),Promise.race([warmMenu,new Promise(r=>setTimeout(r,1500))])]);
+  /* 跳过开机序列：不是“瞬间切走”，而是把时间线快进到末尾 —— 等待音频解锁的
+     那段时间里，启动页仍然以完整形态淡入呈现，观感干净、不突兀。 */
+  _bootSkip=true;
+  /* === 关键修复（卡顿） ===
+     旧版把「切到主菜单」和「菜单 BGM 合成完成」绑在一起等：
+       await Promise.all([init(), Promise.race([warmMenu, 1500ms])])
+     实测 `ensureTrack('menu')` 需要 **约 4 秒**（首次合成整首菜单曲），
+     于是点「开始」后有整整 1.5 秒**完全没有反应** —— 这就是"启动页进主菜单卡顿"。
+     音乐反正是在 AudioSystem 内部异步流式合成的（requestTrack 会在 buffer 就绪后
+     自动开播），**根本没必要阻塞界面切换**。现在只等 init()（音频解锁，实测 0.2ms）
+     就立刻切页面，菜单 BGM 交给后台继续合成，好了自然响。
+     · 保留 220ms 上限：极端机型上连 init() 都可能卡，用超时兜底，绝不无限等。 */
+  await Promise.race([AudioSystem.init(),new Promise(r=>setTimeout(r,220))]).catch(()=>{});
   AudioSystem.setVolumes(Game.save.music,Game.save.sfx);change('menu',{noFx:true});
-  /* 后台空闲预热全部关卡 BGM：之后进任何关卡都是零延迟、音乐立刻正确 */
-  try{if(AudioSystem.prewarm)AudioSystem.prewarm(Game.levels.map(r=>r.lv));}catch(e){}}
+  /* 后台空闲预热 BGM：之后进任何关卡都是零延迟、音乐立刻正确。
+     同时把菜单轨也补进预热队列 —— 它刚才没被前台等完，需要继续算完。
+     ★不能 `Game.levels.map(r=>r.lv)`★：程序化关卡下那会把 1000 关全展开。
+     音频的种子取自关卡内容（canonicalFeature），所以确实需要展开，
+     但只展开「窗口内那几关」即可 —— prewarm 第二个参数就是窗口起点。
+     这里传**惰性访问数组**（用 proxy 风格的 getter 数组），
+     让 prewarm 只取它真正需要的那几项。 */
+  try{if(AudioSystem.prewarm)_lazyPrewarm();}catch(e){}}
 /* 起始页：只有跳动的提示文字，不摆放任何按钮 */
 function boot(){
-  /* 简约独立游戏启动页：居中 logo + 一行标语 + 呼吸提示，其余一律留白。
-     移除了旧版的左右箭头、双行提示与副标题短线，观感更接近独立游戏开场。 */
-  const cy=H*.40;
-  styledText('拼 死 跳 跃',W/2,cy-H*.030,2.30,['#ffffff','#ffe98a','#e8a92c','#96630e'],3.6,0.25);
-  styledText('D I E   T O   J U M P',W/2,cy+H*.048,1.06,['#ffffff','#fff3cf','#f4c96a','#b8811c'],1.9,0.25);
-  rect(W/2-Math.round(W*.15),cy+H*.086,Math.round(W*.30),1,'rgba(255,255,255,.34)');
-  styledText('每一次陨落，都是下一次起跳的回响',W/2,cy+H*.124,.98,['#ffffff','#fff3cf','#f4c96a','#b8811c'],1.5,0.25);
-  const pulse=.30+.70*(.5+.5*Math.sin(clock*2.4));
-  g.save();g.globalAlpha=pulse;
-  styledText('按 任 意 键 开 始',W/2,H*.82,1.30,['#ffffff','#fff2b0','#f0b73e','#a9770f'],2.2,0.25);
-  g.restore();
-  g.save();g.globalAlpha=.42;textRight('v1.0 · 独立游戏版',W-18,H-16,C.skyInkDim,.75);g.restore();}
-function menu(){titleBlock(W/2,H*.21,1.0);
-  const items=[['chooseLevels','选择关卡','flag',()=>change('levels'),true],
+  /* 开机序列（独立游戏式）：logo → 副标题 → 分隔线 → 标语 → 提示 → 版本号，
+     逐级 ease-out 淡入 + 上浮；logo 处一道光扫（克制，只扫一次）。
+     实现全部在 bootProgress()/bootCommon()，手机版 boot 直接复用（避免两套源码漂移）。 */
+  bootCommon(bootProgress(),H*.40,W/2,H);
+}
+/* 主菜单：**裸文字版式**（参考六款游戏的主菜单全部如此）。
+   不再有按钮底板 —— 四行文字纵向排列，选中项转暖金 + 左侧菱点 + 右移 4px。
+   版式上把标题压到偏上（.175），菜单块居中偏下，底部留大片负空间。
+   唯一补偿：文字带下铺一层**局部柔和暗压**（不是整屏盖纱！），
+   只把文字所在的纵向区间压暗一点点，保证裸文字在纹理背景上依然读得清 ——
+   空洞骑士 / 动物井的标题区也都是这么局部压的。 */
+function menu(){skyMotes();titleBlock(W/2,H*.175,1.06);
+  const step=74,h=60,y=Math.round(H*.43);
+  textBandHalo(H*.175-56,H*.175+70);      /* 标题带 */
+  textBandHalo(y-18,y+step*3+h+18);       /* 菜单带 */
+  const items=[['chooseLevels','选择关卡','flag',()=>change('levels'),false],
     ['settings','设置','gear',()=>change('settings'),false],
     ['help','游戏说明','book',()=>change('help'),false],
     ['exit','退出游戏','exit',()=>change('exitConfirm'),false]];
-  const x=W/2-152,step=54,h=46,th=(items.length-1)*step+h,y=Math.round(H*.46);
-  items.forEach(([id,label,ic,fn,primary],j)=>button(id,label,x,y+j*step,304,h,fn,{primary,icon:ic}));}
-function header(title,sub){button('back','返回',28,26,104,36,()=>change('menu'),{icon:'back'});styledText(title,W/2,52,1.7,['#ffffff','#ffe98a','#e8a92c','#96630e'],3.0,0.25);if(sub)text(sub,W/2,80,C.skyInkDim,1.0);}
-function trophyPlate(ex,ey,taken,total){const w=206,h=46,x=ex-w,y=ey;panel(x,y,w,h,{tone:'gold'});icon('trophy',x+32,y+h/2,2.0);rect(x+56,y+9,2,h-18,C.goldDeep);text('奖杯',x+74,y+17,C.ink,1.0);text(`${taken} / ${total}`,x+160,y+29,C.ink,1.3);}
+  items.forEach(([id,label,ic,fn,primary],j)=>staggerBlock(1,j,()=>
+    button(id,label,W/2-210,y+j*step,420,h,fn,{primary,plain:true,big:true})));}
+/* 文字带柔和暗压：上下各 40px 渐隐，中段略实（峰值仅 .30，只是"把背景往后推"）。
+   与整屏 scrim 的区别：这是**局部**的，画面四周的夜景插画完全不受影响。 */
+function textBandHalo(y0,y1){const hh=Math.round(y1-y0);if(hh<=0)return;
+  const c=document.createElement('canvas');c.width=1;c.height=8;const q=c.getContext('2d');
+  const gr=q.createLinearGradient(0,0,0,8);
+  gr.addColorStop(0,'rgba(5,8,18,0)');gr.addColorStop(.30,'rgba(5,8,18,0.30)');
+  gr.addColorStop(.70,'rgba(5,8,18,0.30)');gr.addColorStop(1,'rgba(5,8,18,0)');
+  q.fillStyle=gr;q.fillRect(0,0,1,8);
+  g.drawImage(c,0,0,1,8,0,Math.round(y0),W,hh);}
+/* 局外面板的“空气感”：浮尘 + 极淡顶部光晕（只在菜单与选关页调用，局内不调用） */
+function skyMotes(){motes(0,0,W,H*.94,26,7);}
+function header(title,sub){button('back','返回',28,30,116,44,()=>change('menu'),{icon:'back'});text(title,W/2,54,C.ink,1.92,1,'rgba(5,3,14,0.78)');if(sub)text(sub,W/2,84,C.inkSoft,1.10,1,'rgba(5,3,14,0.70)');}
+function trophyPlate(ex,ey,taken,total){const w=228,h=52,x=ex-w,y=ey;panel(x,y,w,h,{tone:'gold'});icon('trophy',x+36,y+h/2,2.1);text('奖杯',x+80,y+21,C.inkSoft,1.06);text(`${taken} / ${total}`,x+176,y+32,C.ink,1.42);}
 /* --------------------------------------------------------------- 选择关卡 */
-function levels(){const all=Game.levels.flatMap(r=>r.lv.elements.filter(e=>e.type==='trophy').map(e=>r.key+'::'+e.id)),taken=all.filter(k=>Game.save.trophies[k]).length;
-  header('选择关卡','');trophyPlate(W-30,26,taken,all.length);
+function levels(){skyMotes();
+  /* ★奖杯统计不能遍历 r.lv.elements★
+     程序化关卡下 r.lv 是**懒展开**的：为了数奖杯而访问 1000 个 r.lv
+     会把全部 1000 关都展开（约 114MB + 数百 ms），彻底抵消懒加载的意义。
+     配方里已预存 trophyIds（打包时算好的），优先用它。 */
+  const all=Game.levels.flatMap(r=>{
+    const ids=r.trophyIds!=null?r.trophyIds:(r.lv&&r.lv.elements?r.lv.elements.filter(e=>e.type==='trophy').map(e=>e.id):[]);
+    return ids.map(id=>r.key+'::'+id);
+  }),taken=all.filter(k=>Game.save.trophies[k]).length;
+  header('选择关卡','');trophyPlate(W-32,30,taken,all.length);
   /* 列数自适应：宽屏/超宽屏铺更多列，避免整块面板缩在中间显得空 */
   const per=colsPerRow(),start=Game.page*per,gap=28,cw=Math.min(258,(W-190-gap*(per-1))/per),ch=Math.min(300,H-244),y=Math.max(114,(H-ch)/2+16),count=Math.min(per,Math.max(0,Game.levels.length-start)),offset=(W-(cw*count+gap*Math.max(0,count-1)))/2;
-  if(!Game.levels.length){panel(W/2-250,y+20,500,120);text('尚无可用关卡',W/2,y+70,C.ink,1.2);}
+  if(!Game.levels.length){panel(W/2-250,y+20,500,120);text('尚无可用关卡',W/2,y+70,C.ink,1.36);}
+  /* === 卡片排版修复（用户反馈"文字显示不全被遮盖 / 字号一样大没有主次"） ===
+     旧版三个问题，逐条修：
+       ① **时间值被按钮压住（真 bug）**：时间画在 y+244，而按钮占 y+242~282 —— 
+          两者直接重叠，"最快时间 00:00.00"永远被按钮盖住。现在整块纵向布局
+          自下而上重排，并留足安全间距（相邻两行中心距 ≥ 两行半高之和）。
+       ② **缩略图被拉伸**：preview 画布是 340×150（比例 2.267），旧版硬塞进
+          cw-32 × 128（比例 1.77）⇒ 纵向被拉长变形。改为按原始比例算高度。
+       ③ **字号无主次**：关卡名 1.44 / 时间 1.34 / 标签 0.98 —— 挤在同一量级。
+          重建层级：关卡名最大(1.60) > 时间值(1.44, 金) > 标签(0.96, 极淡)，
+          并把「最快时间」与数值并成一行"数据行"（左标签 + 右数值），
+          既省一行高度给出足够的行距，又是真正的信息层级（像数据表）。 */
   for(let j=0;j<per;j++){const i=start+j,r=Game.levels[i];if(!r)continue;const x=offset+j*(cw+gap),on=unlocked(i);
     panel(x,y,cw,ch);
-    rect(x+14,y+14,cw-28,132,'#ffffff');
-    if(r.preview)g.drawImage(r.preview,x+16,y+16,cw-32,128);
-    rect(x+14,y+14,cw-28,1,'#ffffffcc');rect(x+14,y+142,cw-28,1,'#00000033');
-    if(!on){rect(x+14,y+14,cw-28,130,'rgba(247,239,215,0.72)');icon('lock',x+cw/2,y+80,2.8);}
-    panel(x+20,y+20,46,26,{tone:'gold'});text(String(i+1).padStart(2,'0'),x+43,y+35,C.ink,1.0);
-    if(Game.save.completed[r.key]){panel(x+cw-76,y+20,58,24,{tone:'teal'});text('已通关',x+cw-47,y+33,C.ink,.82);}
-    rect(x+20,y+156,cw-40,2,'#cbbf9e');
-    text(r.lv.name,x+cw/2,y+178,on?C.ink:C.inkFaint,1.22);
-    text('最快时间',x+cw/2,y+206,C.inkSoft,.88);
-    text(formatTime(Game.save.best[r.key]),x+cw/2,y+232,Number.isFinite(Game.save.best[r.key])?C.ink:C.inkFaint,1.18);
-    button('level-'+i,on?'进入':'未解锁',x+20,y+ch-56,cw-40,38,()=>begin(i),{primary:on,disabled:!on,icon:on?'play':'lock'});}
-  const by=H-84,pages=Math.max(1,Math.ceil(Game.levels.length/per));
-  if(pages>1){button('pagePrev','◀',W/2-190,by,62,36,()=>{Game.page--;},{disabled:Game.page===0});panel(W/2-114,by,228,36);text(`第 ${Game.page+1} / ${pages} 页`,W/2,by+18,C.ink,1.05);button('pageNext','▶',W/2+128,by,62,36,()=>{Game.page++;},{disabled:Game.page>=pages-1});}}
+    const pad=16,iw=cw-pad*2,th=Math.round(iw*150/340);          /* 按 preview 原始比例，不拉伸 */
+    rrect(x+pad,y+pad,iw,th,8,C.well);
+    /* ★用 peekPreview（只读缓存）而不是 r.preview★：后者未命中会同步现算，
+       把本帧拖成 50ms+ 长任务。未命中就留空槽，预热补好后下一帧自动出现。 */
+    const _pv=peekPreview(r);
+    if(_pv)g.drawImage(_pv,x+pad,y+pad,iw,th);
+    /* 关卡缩略图是**亮底**的实际场景渲染 —— 直接放进暗色主题会像"贴了一张亮纸"。
+       叠一层靛蓝暗压把它拉进同一色域（同 sky 的调色思路）。 */
+    rrect(x+pad,y+pad,iw,th,8,'rgba(8,12,24,0.34)');
+    /* 缩略图上的角标：先铺一层极淡的顶部暗底，避免关号/徽标与亮画面撞色 */
+    rect(x+pad,y+pad,iw,28,'rgba(6,9,18,0.66)');
+    if(!on){rrect(x+pad,y+pad,iw,th,8,'rgba(6,9,18,0.80)');icon('lock',x+cw/2,y+pad+th/2,2.9);}
+    text(String(i+1).padStart(2,'0'),x+pad+18,y+pad+15,C.goldHi,1.30);
+    /* 通关徽标：绿色在靛蓝夜里太跳，改为"极淡青 + 左侧小点"的克制标记 */
+    if(Game.save.completed[r.key]){const cxm=x+cw-pad-46;rect(cxm,y+pad+15,2,2,'rgba(134,217,201,0.9)');
+      text('已通关',x+cw-pad-38,y+pad+15,'rgba(134,217,201,0.82)',.96);}
+    /* —— 文字区（自下而上定位，确保与按钮零重叠）—— */
+    const btnH=42,btnY=y+ch-pad-btnH;
+    const statY=btnY-26;                                          /* 数据行中心 */
+    text(r.lv.name,x+cw/2,statY-56,on?C.ink:C.inkFaint,1.60,1,'rgba(5,3,14,0.70)');   /* 关卡名：最大 */
+    textLeft('最快时间',x+pad+2,statY,C.inkFaint,.96);                                  /* 标签：最小最淡 */
+    /* 无纪录时用 inkSoft（而非 inkFaint）：占位符 `--:--.--` 在暗卡上若太淡会像"没渲染出来" */
+    textRight(formatTime(Game.save.best[r.key]),x+cw-pad-2,statY,
+      Number.isFinite(Game.save.best[r.key])?C.goldHi:C.inkSoft,1.44);                  /* 数值：金色次大 */
+    button('level-'+i,on?'进入':'未解锁',x+22,btnY,cw-44,btnH,()=>begin(i),{primary:on,disabled:!on,icon:on?'play':'lock'});}
+  const by=H-82,pages=Math.max(1,Math.ceil(Game.levels.length/per));
+  if(pages>1){button('pagePrev','◀',W/2-190,by,62,38,()=>{Game.page--;refocusPreviewPrewarm();},{disabled:Game.page===0});text(`第 ${Game.page+1} / ${pages} 页`,W/2,by+19,C.inkSoft,1.20);button('pageNext','▶',W/2+128,by,62,38,()=>{Game.page++;refocusPreviewPrewarm();},{disabled:Game.page>=pages-1});}}
 /* ----------------------------------------------------------- 设置 / 暂停 */
-function settings(paused=false){if(!paused)header('设置','');const pw=Math.min(600,W-40),ph=306,x=(W-pw)/2,y=(H-ph)/2;panel(x,y,pw,ph);
-  text(paused?'已暂停':'声音与存档',W/2,y+38,C.ink,1.55);
-  rect(x+28,y+60,pw-56,2,'#cbbf9e');
-  /* 滑条长度按面板实际宽度自适应，窄窗口下不会被裁掉 */
-  const sw=Math.max(150,pw-354);
-  icon('sound',x+38,y+116,1.35);slider('musicSlider','音乐音量',x+92,y+110,sw,Game.save.music,v=>setVol('music',v));
-  icon('sound',x+38,y+172,1.35);slider('sfxSlider','音效音量',x+92,y+166,sw,Game.save.sfx,v=>setVol('sfx',v));
-  if(paused){const bw=Math.max(110,(pw-100)/2);button('resume','继续游戏',x+44,y+214,bw,42,()=>pause(),{primary:true,icon:'play'});button('returnLevels','返回选关',x+pw-44-bw,y+214,bw,42,()=>change('levels'),{icon:'flag'});text('按 ESC 继续',W/2,y+282,C.inkSoft,.95);}
-  else{button('resetSave','清除存档',x+pw/2-120,y+216,240,42,()=>change('resetConfirm'),{icon:'exit'});text('清空进度、奖杯、纪录与声音设置',W/2,y+284,C.inkSoft,1.0);}}
+/* ══════════════════════════════════════════════════════════════════════════
+   ★设置页的「列对齐」规范★
+
+   用户原话：「设置里的扫描线开关和镜头畸变调整的UI要对齐要注重整体排版，
+              你现在的版本没对齐很丑！！」
+
+   ▍旧版为什么丑（根因，不是"再挪几像素"能解决的）
+     · 音量行用 `slider()`，它的**标签**画在 `x+0`、**滑条**画在 `x+118`
+       —— 即 slider 内部的偏移是写死的；
+     · 而 CRT 开关直接用 `button()` 摆在 `x+100`（想跟滑条对齐），
+       但它的标签是按钮**自己的文字**，居中在按钮里 ⇒ 标签与滑条行的标签
+       根本不在同一列；
+     · 于是屏幕上出现三条互不对齐的左缘（音量标签 / 按钮文字 / 滑条），
+       再加一个单独的齿轮图标，视线上完全散掉。
+
+   ▍本版的做法：**只允许两条左缘**
+     · 标签列 `LBL_X`：每行说明文字的左缘，**全部**贴在这里；
+     · 控件列 `CTRL_X`：滑条轨道左端 / 开关按钮左缘，**全部**贴在这里。
+     行基线（`ry`）等距排列（48px），右侧留同一列读数（`%`）。
+     两列 + 一个预览窗，构成"左标签 | 控件 | 读数 | 预览"的四段式网格。
+   ══════════════════════════════════════════════════════════════════════════ */
+function _rrPath(c,x,y,w,h,r){
+  r=Math.max(0,Math.min(r,Math.floor(Math.min(w,h)/2)));x=Math.round(x);y=Math.round(y);
+  w=Math.round(w);h=Math.round(h);
+  c.beginPath();
+  if(c.roundRect){c.roundRect(x,y,w,h,r);return;}
+  c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);c.closePath();
+}
+/* ★已删除「实时预览」小窗（crtPreview）★
+   用户原话：「为啥要在设置里塞一个小窗预览啊？我觉得很没必要，还占地方」。
+   v2 起球面感来自**游戏画面本身**的真几何畸变（见 crt.js 的 WARP_MAX_K 段注释），
+   拖「屏幕曲率」滑杆时整屏画面实时变化 —— 玩家直接看着真实画面调，
+   不再需要一块等比缩放的假预览（它反而占了 170×100 的宝贵版面）。 */
+/* 一行：标签（左对齐到 LBL_X）
+   ★标签**不再由控件自己画**★（旧版正是"滑条内部画标签 + 按钮居中画文字"
+   导致三条左缘错位）。现在标签与控件彻底解耦，各自锚在自己的列上。 */
+function uiLabel(label,lx,ry){
+  textLeft(label,lx,ry,C.inkSoft,1.10);
+}
+/* 一行：滑条（轨道左端锚在 CTRL_X，读数锚在 CTRL_END 右对齐） */
+function uiSlider(id,lx,ry,barX,barW,endX,val,set){
+  const bh2=22;
+  buttons.push({id,label:id,x:Math.round(barX),y:Math.round(ry-bh2/2),w:Math.round(barW),h:bh2,slider:true,
+    fn:()=>set(Math.max(0,Math.min(1,(pointer.x-barX)/barW)))});
+  rrect(barX,ry-5,barW,10,5,C.well);
+  const fill=barW*val;
+  if(fill>1){rrect(barX,ry-5,fill,10,5,C.gold);rect(barX+3,ry-3,Math.max(1,fill-6),3,C.goldHi);}
+  rrect(barX+fill-8,ry-11,16,22,8,C.goldHi);
+  rect(barX+fill-4,ry-7,3,14,'#fffdf0');
+  /* 读数**右对齐到 endX**（而不是像旧版那样"滑条右端 + 固定 58px"）——
+     这样无论面板多宽，所有读数都在同一条右缘上。 */
+  textRight(Math.round(val*100)+'%',endX,ry+6,C.ink,1.20);
+  if(dragSlider===id)set(Math.max(0,Math.min(1,(pointer.x-barX)/barW)));
+}
+/* 一行：开关（按钮左缘锚在 CTRL_X，宽度与滑条轨道一致 ⇒ 左缘严丝合缝） */
+function uiToggle(id,label,btnX,ry,btnW,on,fn,disabled){
+  button(id,label,btnX,ry-20,btnW,40,fn,{primary:!!on&&!disabled,disabled:!!disabled});
+}
+function settings(paused=false){
+  if(!paused)header('设置','');
+  const pw=Math.min(620,W-40);
+  /* ★面板高度由内容反推★（而不是先定高度再硬塞内容）。
+     行清单（全部相对面板顶 y）：
+       42  标题 · 66 分隔线
+       124/172  音量两行（行距 48）
+       200 分区线 · 222 分区标题
+       262  复古单行（★v3：扫描线/曲率调节项已删除，只留滤镜总开关★）
+       424 底部按钮（高 44 ⇒ 底 468）· 492 提示文字
+     ⇒ 需要 524（★保留原高度★：下方还有一段「画面徽标」说明条填补空白，
+        面板不会因为少了两行而变矮或露出空槽）。 */
+  const ph=524;
+  const x=(W-pw)/2, y=Math.max(10,(H-ph)/2);
+  panel(x,y,pw,ph);
+  text(paused?'已暂停':'声音与存档',W/2,y+42,C.ink,1.72);
+  rect(x+pw*0.30,y+66,pw*0.40,1,'rgba(167,139,250,0.34)');
+
+  /* ---- 两列网格：标签列 LBL_X、控件列 CTRL_X ----
+     ★控件列的 x 必须由"最长标签的实际墨迹宽度"反推★，不能写死。
+     写死过一次（x+154），结果"镜头曲率（球面感）"9 个字的实际宽度约 126px
+     （像素字 advance ≈ 11.5px/字 @mul 1.10），直接顶进按钮下面 —— 截图一看
+     就是"标签被按钮盖住"。现在用 `textW` 实测最长标签，控件列自动跟在它后面。
+     ★v2 变更★：右侧的「实时预览」小窗已删除（用户要求），
+     于是控件列可以一直铺到面板右内边距 —— 滑条更长、读数更大方。 */
+  const narrow=pw<560;
+  const PAD_R=30;                 /* 面板右侧统一内边距 */
+  const LBL_X=x+(narrow?56:78);
+  const LBL_W=Math.max(
+    textW('音乐音量',1.10),textW('音效音量',1.10),
+    textW('滤镜总开关',1.10));
+  const CTRL_X=LBL_X+LBL_W+18;
+  const RD_RES=58;                /* 读数（百分比）预留宽度 */
+  /* 控件右端 = 面板右内边距（不再给预览窗让位） */
+  const CTRL_END=x+pw-PAD_R;
+  const BAR_W=Math.max(96,CTRL_END-CTRL_X-RD_RES);
+  const RD_X=CTRL_END;
+  const BTN_W=Math.min(BAR_W,220);
+  /* ★全页统一行距 ROW★（48px）：五个行（2 音量 + 3 复古）全部落在同一条网格上。
+     旧版是 52/48/57 三种节奏混用，打印出来就是"长短腿" —— 用户"没对齐很丑"
+     里有一半来自这个。现在**所有行都以"行中心"定位**，行距常数化。 */
+  const ROW=48;
+  const RY_V1=y+124, RY_V2=RY_V1+ROW;
+  const RY_HDR=y+222;
+  /* ★v3：扫描线 / 屏幕曲率两行的行位（RY2/RY3）已随控件一起删除★
+     —— 复古电视效果现在只剩「滤镜总开关」一行，相关手感（扫描线强度、
+     屏幕球面曲率）由 crt.js 内置默认值统一给出，玩家无需也无法调节。 */
+  const RY1=y+262;
+
+  /* ---- 音量两行 ---- */
+  icon('sound',x+42,RY_V1,1.42);
+  uiLabel('音乐音量',LBL_X,RY_V1+6);
+  uiSlider('musicSlider',LBL_X,RY_V1,CTRL_X,BAR_W,RD_X,Game.save.music,v=>setVol('music',v));
+  icon('sound',x+42,RY_V2,1.42);
+  uiLabel('音效音量',LBL_X,RY_V2+6);
+  uiSlider('sfxSlider',LBL_X,RY_V2,CTRL_X,BAR_W,RD_X,Game.save.sfx,v=>setVol('sfx',v));
+
+  /* ---- 复古电视效果分区 ---- */
+  rect(x+34,y+200,pw-68,1,'rgba(167,139,250,0.18)');
+  textLeft('复古电视效果',LBL_X-26,RY_HDR,C.ink,1.14);
+  const _crtOK=(typeof CRT!=='undefined'&&CRT);
+
+  const curveOn=_crtOK?CRT.enabled():false;
+  icon('crt',x+42,RY1,1.42);
+  uiLabel('滤镜总开关',LBL_X,RY1+6);
+  uiToggle('crtToggle',_crtOK?(CRT.enabled()?'已开启':'已关闭'):'不可用',CTRL_X,RY1,BTN_W,curveOn,()=>{
+    const v=CRT.toggle();persist();notify('复古滤镜已'+(v?'开启':'关闭'));
+  },!_crtOK);
+  /* ★v3 新增：开启后的「画面徽标」说明条★
+     删掉扫描线/曲率两个调节项后，这一格若是留空会显得面板"缺了一块"。
+     这里补一条与 CRT 视觉语言一致的徽标条（像素电视 + 三枚特性标签 + 状态），
+     既填满版面、又向玩家交代"老电视效果长什么样"，且**不可交互**（不是按钮），
+     不会让观众误以为还要调什么。 */
+  (function(){
+    const by=RY1+ROW-14, bh=30, bw=Math.min(CTRL_END-CTRL_X, 360);
+    rrect(CTRL_X,by,bw,bh,6,'rgba(30,26,48,0.55)');
+    rrect(CTRL_X+1,by+1,bw-2,bh-2,5,'rgba(167,139,250,0.06)');
+    rect(CTRL_X+11,by+bh/2-7,18,13,'rgba(214,198,255,0.62)');
+    rect(CTRL_X+13,by+bh/2-5,14,8,'rgba(18,14,32,0.85)');
+    rect(CTRL_X+14,by+bh/2-4,12,2,'rgba(255,255,255,0.22)');
+    const tags=['扫描线','球面畸变','暗角'];
+    let tx=CTRL_X+38;
+    for(const tg of tags){
+      const tw=textW(tg,0.98)+14;
+      rrect(tx,by+bh/2-8,tw,16,8,'rgba(167,139,250,0.16)');
+      text(tg,tx+tw/2,by+bh/2+4,'rgba(214,198,255,0.86)',0.98);
+      tx+=tw+7;
+    }
+    text(curveOn?'已应用':'已停用',CTRL_X+bw-12,by+bh/2+4,
+      curveOn?'rgba(255,222,140,0.92)':'rgba(190,186,210,0.55)',1.02);
+  })();
+
+  /* ---- 底部 ---- */
+  if(paused){
+    const bw=Math.max(110,(pw-100)/2);
+    button('resume','继续游戏',x+46,y+424,bw,44,()=>pause(),{primary:true,icon:'play'});
+    button('returnLevels','返回选关',x+pw-46-bw,y+424,bw,44,()=>change('levels'),{icon:'flag'});
+    text('按 ESC 继续',W/2,y+496,C.inkFaint,1.02);
+  }else{
+    button('resetSave','清除存档',x+pw/2-124,y+424,248,44,()=>change('resetConfirm'),{icon:'exit'});
+    text('清空进度、奖杯、纪录与声音设置',W/2,y+496,C.inkFaint,1.06);
+  }
+}
 function help(){header('游戏说明','');
   /* 面板宽度自适应视口：窄窗口下整体等比缩小，保证按键列与文字列都不越界、不裁切。 */
   const maxW=704,pw=Math.min(maxW,W-40),k=pw/maxW;
   const x=W/2-pw/2,ph=Math.min(426,H-140),y=Math.max(88,Math.min(104,(H-ph)/2));
   panel(x,y,pw,ph);
-  button('helpKeys','键位说明',x+22*k,y+20,168*k,36,()=>{Game.tab=0;},{primary:Game.tab===0});
-  button('helpRules','玩法说明',x+202*k,y+20,168*k,36,()=>{Game.tab=1;},{primary:Game.tab===1});
-  rect(x+22*k,y+68,pw-44*k,2,'#cbbf9e');
+  button('helpKeys','键位说明',x+22*k,y+20,168*k,38,()=>{Game.tab=0;},{primary:Game.tab===0});
+  button('helpRules','玩法说明',x+202*k,y+20,168*k,38,()=>{Game.tab=1;},{primary:Game.tab===1});
+  rect(x+22*k,y+70,pw-44*k,1,'rgba(167,139,250,0.24)');
   if(!Game.tab){const rows=[['A / D','左右移动'],['W / ↑','跳跃 · 长按更高 · 空中二段跳 / 蹬墙跳'],['空格','跳跃'],['F','插旗 / 拔旗 · 设置重生点'],['K','主动爆破 · 推箱 / 碎块 / 引燃'],['J','按住减缓幽灵回放 · 消耗慢放能量'],['L','幽灵回到轨迹起点'],['ESC','暂停 / 继续']];
     /* 行距随可用高度压缩，避免高/矮窗口下行溢出面板 */
     const step=Math.min(46,(ph-104)/rows.length);
-    rows.forEach(([key,s],i)=>{const dy=92+i*step;keyboard(key,x+40*k,y+dy,104*k,1.05*Math.max(.8,k));textLeft(s,x+196*k,y+dy+15,C.ink,1.14*Math.max(.82,k));});}
+    rows.forEach(([key,s],i)=>{const dy=94+i*step;keyboard(key,x+40*k,y+dy,104*k,1.08*Math.max(.8,k));textLeft(s,x+198*k,y+dy+15,C.ink,1.22*Math.max(.82,k));});}
   else{const lines=['抵达终末之门即可通关，通关后解锁下一关。','阵亡会留下回放幽灵：可承载你、压住机关、阻隔激光。','爆破与幽灵回放的爆炸能推箱、碎块、引燃与融冰。','旗子可设新重生点；拔旗清除幽灵并回退上一个重生点。','生命耗尽则本关失败，可即时重试；奖杯一经拾取永久保留。','冰面打滑、重力区倒转、消失台周期隐现、开关联动门扉。','水中移动迟滞，连续浸水十秒窒息，出水即恢复呼吸。','烟雾遮蔽视野，幽灵周围会开辟可视范围。','用时包含阵亡过程，不含暂停；最快时间支持反复刷新。'];
     const step=Math.min(32,(ph-108)/lines.length);
-    lines.forEach((l,i)=>{const ly=y+98+i*step;rect(x+48*k,ly-6,6,6,C.gold);rect(x+50*k,ly-4,2,2,'#fff4c4');textLeft(l,x+72*k,ly,C.ink,1.12*Math.max(.82,k));});}}
-function confirmScreen(kind){const reset=kind==='resetConfirm';const pw=Math.min(540,W-40),ph=240,x=(W-pw)/2,y=(H-ph)/2;panel(x,y,pw,ph);
-  text(reset?'确认清除存档？':'结束这次冒险？',W/2,y+46,reset?'#8e1d28':C.ink,1.55);
-  text(reset?'进度、奖杯、纪录与设置都会重置，无法恢复':'进度已自动保存，下次仍可继续',W/2,y+94,C.inkSoft,1.05);
+    lines.forEach((l,i)=>{const ly=y+100+i*step;stud(x+52*k,ly-4);textLeft(l,x+76*k,ly,C.ink,1.20*Math.max(.82,k));});}}
+function confirmScreen(kind){const reset=kind==='resetConfirm';const pw=Math.min(560,W-40),ph=252,x=(W-pw)/2,y=(H-ph)/2;panel(x,y,pw,ph);
+  text(reset?'确认清除存档？':'结束这次冒险？',W/2,y+50,reset?'#ff9aa5':C.ink,1.72);
+  text(reset?'进度、奖杯、纪录与设置都会重置，无法恢复':'进度已自动保存，下次仍可继续',W/2,y+100,C.inkSoft,1.16);
   const bw=Math.max(110,(pw-108)/2);
-  button('confirmNo','取消',x+48,y+156,bw,42,()=>change(reset?'settings':'menu'));
-  button('confirmYes',reset?'确认清空':'退出',x+pw-48-bw,y+156,bw,42,()=>{if(reset)resetProgress();else{change('quit');window.close();}},{primary:true});}
+  button('confirmNo','取消',x+50,y+164,bw,44,()=>change(reset?'settings':'menu'));
+  button('confirmYes',reset?'确认清空':'退出',x+pw-50-bw,y+164,bw,44,()=>{if(reset)resetProgress();else{change('quit');window.close();}},{primary:true});}
 /* ------------------------------------------------------------------- 局内 HUD */
 function hud(){
-  panel(18,16,Math.max(104,Play.lives*26+30),44);
+  panel(18,16,Math.max(104,Play.lives*26+30),44,{r:10});
   for(let i=0;i<Play.lives;i++)heart(32+i*26,30,2);
   for(const a of Game.hearts){const t=clock-a.time;if(t<.8){g.save();g.globalAlpha=1-t/.8;heart(a.x,30+t*30,2,C.red,t*8);g.restore();}}
-  panel(W/2-94,16,188,44);text(formatTime(Game.elapsed),W/2,36,C.ink,1.38);
+  panel(W/2-94,16,188,44,{r:10});textMono(formatTime(Game.elapsed),W/2,36,C.ink,1.46);
   button('pauseButton','',W-72,16,54,44,()=>pause(),{icon:'pause'});
-  panel(18,H-70,Math.max(104,Play.flagsCollected*26+30),48);
+  panel(18,H-70,Math.max(104,Play.flagsCollected*26+30),48,{r:10});
   for(let i=0;i<Play.flagsCollected;i++)flagIcon(32+i*26,H-58,1.9);
   if(!Play.flagsCollected)text('无旗',64,H-44,C.inkFaint,.95);
   const bx=170+Play.flagsCollected*26;
@@ -371,22 +1059,24 @@ function hud(){
   if(Play.energy<.999||Play.slowWarn>.01){
     const w=Math.max(0,Math.min(1,Play.slowWarn||0));
     const mix=(a,b)=>Math.round(a+(b-a)*w);
-    const fill=`rgb(${mix(47,232)},${mix(158,176)},${mix(143,38)})`;      /* teal → amber */
-    const hi=`rgb(${mix(102,255)},${mix(201,226)},${mix(184,122)})`;
-    rect(bx-4,H-46,96,10,C.line);rect(bx-2,H-44,92,6,'#fdf8e6');
-    if(Play.energy>0.004){rect(bx-2,H-44,92*Play.energy,6,fill);rect(bx-2,H-44,92*Play.energy,2,hi);}
-    if(Play.slowLocked)text('回能中',bx+44,H-56,'#ffe08a',.78);else text('慢放',bx+44,H-56,C.skyInk,.78);
+    const fill=`rgb(${mix(92,240)},${mix(195,187)},${mix(178,74)})`;      /* teal → amber */
+    const hi=`rgb(${mix(134,255)},${mix(217,227)},${mix(201,145)})`;
+    rrect(bx-4,H-46,96,10,4,C.well);
+    if(Play.energy>0.004){rrect(bx-2,H-44,92*Play.energy,6,3,fill);rect(bx-2,H-44,92*Play.energy,2,hi);}
+    if(Play.slowLocked)text('回能中',bx+44,H-56,'#ffe391',.90);else text('慢放',bx+44,H-56,C.skyInk,.90);
   }
-  if(Play._inWater){panel(W/2-86,H-58,172,32,{tone:'teal'});text('呼吸 '+Play.waterBubbleTimer.toFixed(1)+' 秒',W/2,H-42,C.ink,1.0);}
-  text(Game.levels[Game.selected]?.lv.name||'',W-94,H-46,C.skyInk,.88);}
-function result(win){const pw=540,ph=326,x=(W-pw)/2,y=(H-ph)/2;panel(x,y,pw,ph);
-  if(win)icon('trophy',W/2,y+50,2.3);else heart(W/2-11,y+42,2,C.red,4);
-  styledText(win?'关 卡 完 成':'生 命 耗 尽',W/2,y+98,1.55,win?['#ffffff','#ffe98a','#e8a92c','#96630e']:['#fff0f0','#ff8f96','#d4384a','#8e1d28'],3.0,0.25);
-  if(win){text(formatTime(Game.elapsed),W/2,y+142,C.ink,1.4);panel(W/2-118,y+168,236,32,{tone:Game.newBest?'gold':'paper'});text(Game.newBest?'新的最快纪录':'已记录通过时间',W/2,y+184,C.ink,1.05);}
-  else{text('本次用时 '+formatTime(Game.elapsed),W/2,y+142,C.ink,1.1);text('阵亡 '+Play.deathCount+' 次',W/2,y+170,C.inkSoft,1.05);}
+  if(Play._inWater){panel(W/2-86,H-58,172,32,{tone:'teal',r:9});text('呼吸 '+Play.waterBubbleTimer.toFixed(1)+' 秒',W/2,H-42,C.ink,1.08);}
+  text(Game.levels[Game.selected]?.lv.name||'',W-94,H-46,C.skyInk,.96);}
+function result(win){const pw=560,ph=340,x=(W-pw)/2,y=(H-ph)/2;panel(x,y,pw,ph);
+  if(win)icon('trophy',W/2,y+52,2.4);else heart(W/2-11,y+44,2,C.red,4);
+  text(win?'关 卡 完 成':'生 命 耗 尽',W/2,y+104,win?C.goldHi:'#ff9aa5',1.76);
+  if(win){text(formatTime(Game.elapsed),W/2,y+150,C.ink,1.52);
+    if(Game.newBest)text('新的最快纪录',W/2,y+186,C.gold,1.12);
+    else text('已记录通过时间',W/2,y+186,C.inkSoft,1.12);}
+  else{text('本次用时 '+formatTime(Game.elapsed),W/2,y+150,C.ink,1.18);text('阵亡 '+Play.deathCount+' 次',W/2,y+180,C.inkSoft,1.12);}
   const next=Game.selected<Game.levels.length-1;
-  button('retry','再次挑战',x+42,y+222,214,42,()=>begin(Game.selected),{primary:true});
-  button('resultLevels',win&&next?'下一关':'返回选关',x+284,y+222,214,42,()=>win&&next?begin(Game.selected+1):change('levels'),{icon:win&&next?'play':'flag'});}
+  button('retry','再次挑战',x+46,y+232,220,44,()=>begin(Game.selected),{primary:true});
+  button('resultLevels',win&&next?'下一关':'返回选关',x+294,y+232,220,44,()=>win&&next?begin(Game.selected+1):change('levels'),{icon:win&&next?'play':'flag'});}
 /* ---------------------------------------------------------------- 渲染总入口 */
 /* 响应式缩放：让任意分辨率 / 缩放 / 宽高比下的观感保持一致。
    基准设计格 960x600（16:9）。scale 为“总缩放”，直接作用于绘制矩阵与指针换算，
@@ -418,11 +1108,16 @@ function resize(){
   screenKey='';resizePlayCanvas();}
 function renderUI(){g.setTransform(dpr*scale,0,0,dpr*scale,0,0);g.clearRect(0,0,W,H);buttons=[];
   if(Game.state!=='playing')sky();
-  if(['pause','win','fail'].includes(Game.state))rect(0,0,W,H,'rgba(28,48,70,0.40)');
-  switch(Game.state){case'boot':boot();break;case'menu':menu();break;case'levels':levels();break;case'settings':settings();break;case'help':help();break;case'playing':hud();break;case'pause':settings(true);break;case'win':result(true);break;case'fail':result(false);break;case'resetConfirm':confirmScreen('resetConfirm');break;case'exitConfirm':confirmScreen('exitConfirm');break;case'quit':titleBlock(W/2,H*.36,1.1);text('冒险已结束 · 进度已保存',W/2,H*.58,C.skyInk,1.2);text('可以安全关闭此窗口',W/2,H*.65,C.skyInkDim,1.0);button('backToMenu','返回主菜单',W/2-120,H*.74,240,44,()=>change('menu'));break;}
+  if(['pause','win','fail'].includes(Game.state))rect(0,0,W,H,'rgba(10,16,30,0.34)');
+  /* 统一暗域：把所有局外界面压进同一个靛蓝暗域（参考的"整屏统一色调"）。
+     放在 sky 之后、所有 UI 之前 —— 这样文字与卡片天然浮在氛围底上，
+     不再出现"亮蓝天 + 深灰贴片"两套色系硬拼的观感。局内（playing）不加。 */
+  if(Game.state!=='playing')scrim(Game.state);
+  switch(Game.state){case'boot':boot();break;case'menu':menu();break;case'levels':levels();break;case'settings':settings();break;case'help':help();break;case'playing':hud();break;case'pause':settings(true);break;case'win':result(true);break;case'fail':result(false);break;case'resetConfirm':confirmScreen('resetConfirm');break;case'exitConfirm':confirmScreen('exitConfirm');break;case'quit':titleBlock(W/2,H*.36,1.1);text('冒险已结束 · 进度已保存',W/2,H*.58,C.skyInk,1.2);text('可以安全关闭此窗口',W/2,H*.65,C.skyInkDim,1.0);button('backToMenu','返回主菜单',W/2-120,H*.74,240,46,()=>change('menu'));break;}
   if(Game.toast&&Game.toast.until>clock){const s=Game.toast.text;panel(W/2-238,H-104,476,42,{tone:'gold'});text(s,W/2,H-83,C.ink,1.05);}
+  drawRipples();
   if(Game.transition>0){g.save();g.globalAlpha=Game.transition*.22;rect(0,0,W,H,'#ffffff');g.restore();}
-  syncAccess();}
+  rollButtons();syncAccess();}
 /* ---------------------------------------------- 真实生产路径上的输入与物理 */
 const oldPhysics=stepPlayerPhysics;
 stepPlayerPhysics=function(p,keys,dt,solids,ghosts,mods){const was=p.grounded,prevHold=p.jumpHold,can=p.canDoubleJump,wall=p.wallJumpUsed,vy=p.vy;oldPhysics(p,keys,dt,solids,ghosts,mods);if(p.jumpHold>prevHold&&prevHold===0&&p.vy*p.gravityDir<0)AudioSystem.sfx(p.wallJumpUsed&&!wall?'wallJump':'jump',p.x,p.y);else if(can&&!p.canDoubleJump&&p.vy*p.gravityDir<0)AudioSystem.sfx('doubleJump',p.x,p.y);if(!was&&p.grounded&&vy*p.gravityDir>.5)AudioSystem.sfx('land',p.x,p.y);if(p.grounded&&Math.abs(p.vx)>.3&&Game.simTime-(p._lastStep||0)>.30){AudioSystem.sfx('step',p.x,p.y);p._lastStep=Game.simTime;}};
@@ -440,21 +1135,31 @@ function simulation(){if(Game.state!=='playing')return;Game.elapsed+=1/60;Game.s
 function frame(now){const dt=Math.min(.12,(now-last)/1000);last=now;clock+=dt;Game.transition=Math.max(0,Game.transition-dt*4);
   if(window.MU&&MU.updateTilt)MU.updateTilt(dt);
   if(Game.state==='playing'){acc+=dt;let guard=0;while(acc>=1/60&&guard++<8){simulation();acc-=1/60;}renderPlay();}
-  else if(['pause','win','fail'].includes(Game.state))renderPlay();else acc=0;renderUI();requestAnimationFrame(frame);}
+  else if(['pause','win','fail'].includes(Game.state))renderPlay();else acc=0;renderUI();
+  /* ★选关缩略图预热泵★：挂在帧末尾、限预算（默认 5ms/帧）。
+     不能再用 requestIdleCallback —— 局外每帧都在重绘时它会被饿死
+     （实测每 2~4 秒才推进一关，导致进入选关页时 6 张缩略图同步现算 = 82.6ms
+     长任务）。切进帧循环后每帧都保证推进，且单帧增量 ≤5ms ⇒ 既有预热、又不掉帧。 */
+  if(typeof pumpPreviewPrewarm==='function')pumpPreviewPrewarm();
+  requestAnimationFrame(frame);}
 function point(e){pointer.x=e.clientX/scale;pointer.y=e.clientY/scale;}
-window.addEventListener('pointermove',e=>{point(e);const b=buttons.find(v=>!v.disabled&&inRect(pointer,v));if((b?b.id:'')!==hoverId){hoverId=b?b.id:'';if(hoverId)AudioSystem.sfx('uiHover');}});
+/* hover 只对「精确指针」（鼠标/触控板/笔）生效。
+   触摸屏上手指抬起后浏览器仍会保留 hover，导致按钮一直停在选中态
+   （观感上像“某个按钮坏了”），所以 touch 直接不参与 hover。 */
+window.addEventListener('pointermove',e=>{point(e);if(e.pointerType==='touch'){return;}
+  const b=buttons.find(v=>!v.disabled&&inRect(pointer,v));if((b?b.id:'')!==hoverId){hoverId=b?b.id:'';if(hoverId)sndUI('hover');}});
+window.addEventListener('pointerup',e=>{pointer.down=false;dragSlider=null;if(e&&e.pointerType==='touch')hoverId='';});
 window.addEventListener('pointerdown',e=>{point(e);
   /* 记录本次输入的指针类型：只有触摸/手写笔才会遭受“抬起时界面已换掉”的穿透，
      所以闸门仅对它们生效（鼠标/键盘玩家的点击立即响应，不受影响）。 */
   armGate(e.pointerType);
   pointer.down=true;if(Game.state==='boot'){if(window.MU&&MU.enableGyro)MU.enableGyro();startGame();return;}const b=buttons.find(v=>inRect(pointer,v));if(b&&b.slider){dragSlider=b.id;e.preventDefault();}});
-window.addEventListener('pointerup',()=>{pointer.down=false;dragSlider=null;});
 window.addEventListener('keydown',e=>{const code=e.code;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Escape'].includes(code))e.preventDefault();
   if(Game.state==='boot'){if(!e.repeat&&!['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight'].includes(code))startGame();return;}
   if(code==='Escape'&&!e.repeat){if(['playing','pause'].includes(Game.state))pause();else if(['settings','help','levels'].includes(Game.state))change('menu');else if(Game.state==='resetConfirm')change('settings');else if(Game.state==='exitConfirm')change('menu');return;}
   if(Game.state!=='playing'||e.repeat)return;Play.keys[code==='Space'?'ArrowUp':code]=true;if(code==='KeyK')doSuicidePlay();if(code==='KeyF')doFlagAction();if(code==='KeyJ')AudioSystem.sfx('slow');if(code==='KeyL'){if(rewindGhosts())AudioSystem.sfx('ghost');}if(code==='KeyR')begin(Game.selected);});
 window.addEventListener('keyup',e=>{Play.keys[e.code==='Space'?'ArrowUp':e.code]=false;});
-window.addEventListener('blur',()=>{Play.keys={};pointer.down=false;dragSlider=null;if(Game.state==='playing')pause();});
+window.addEventListener('blur',()=>{Play.keys={};pointer.down=false;dragSlider=null;hoverId='';if(Game.state==='playing')pause();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&Game.state==='playing')pause();});
 /* resize 监听由 mobile-ui.js 接管（它有自己的整套竖屏布局流程），
    手机版在 index.html 里先置 window.MOBILE_MODE=true，这里就不再注册，
@@ -462,7 +1167,118 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&Game.state
    —— 用同一个开关而非两套文件，可避免电脑版/手机版源码漂移。 */
 if(!window.MOBILE_MODE)window.addEventListener('resize',resize);
 /* ------------------------------------------------------------ 关卡载入 */
-function normalize(data){const source=Array.isArray(data)?data:(data&&Array.isArray(data.levels))?data.levels:(data&&data.level)?[data.level]:(data&&data.elements)?[data]:[];const out=[];
+const _pvOrder=[];let _pvBytes=0;
+/* 缩略图有界 LRU 预算：48 张 × 340×150×4B ≈ 9.4MB。
+   1000 关若无限缓存是 195MB 常驻（且大部分永远不再翻到）。 */
+const PV_CACHE_MAX=48;
+/* ══════════════════════════════════════════════════════════════════════════
+   ★程序化关卡（Procedural Levels）—— 支撑 100~1000+ 关不卡顿★
+   ══════════════════════════════════════════════════════════════════════════
+   ▍问题（实测）
+     每关 JSON 约 97KB，其中 93.7% 是背景视差形状。
+     1000 关若全部内联进 levels.js = **94.6MB**，浏览器同步解析要数十秒，
+     且全程卡死主线程 —— 与「任何环节绝对不会卡顿」直接冲突。
+
+   ▍解法
+     levels.js 只存「配方」（idx + 名字 + 主题 + 奖杯 id，约 80B/关），
+     真正的地形与背景由 levels.genlib.js（浏览器版生成器）**按需重算**。
+     生成器是完全确定性的（同 idx 跨进程 md5 一致，无 Math.random/Date.now），
+     已实测 genlib 与 Node 端输出**逐字节一致**（lvgen/_genlib_test.cjs）。
+     压缩比约 1200:1（94.6MB → 约 80KB）。
+
+   ▍展开时机（★这是"上千关也不卡"的关键★）
+     启动        → 只读 recipes，**不展开任何地形**（< 5ms）
+     进选关页    → 展开当前可见页 + 邻页
+     进关        → 展开那一关（单关约 0.6ms）
+     展开结果走有界 LRU，常驻内存受控（见 _expandEvict）
+
+   ▍向后兼容
+     data.levels 有值（旧格式）→ 走原路径，完全不经过本层。
+     只有 data.recipes 存在时才启用懒展开。 */
+const _expOrder=[];let _expBytes=0;
+const EXP_MAX=64;                          /* 展开缓存上限（64 关 ≈ 2.5MB 元素 + 背景按需） */
+function _materialize(rec){
+  /* 用 genlib 按配方重建 c 完整关卡对象 */
+  const LG=window.LevelGen;
+  if(!LG||typeof LG.build!=='function')return null;
+  try{return LG.build(rec.i);}catch(e){return null;}
+}
+function _expandEvict(keep){
+  while(_expOrder.length>EXP_MAX){
+    const old=_expOrder.shift();
+    if(!old||old===keep)continue;
+    old._lv=undefined;old._expanded=false;_expBytes-=old._estBytes||0;
+  }
+}
+function normalize(data){
+  /* === 程序化分支：只建配方骨架，地形延迟到真正要用时才展开 ===
+     ★v2 新增 `data.levels` 前缀★：允许在程序化关卡**之前**插入少量
+     "手工/测试关卡"（编辑器导出的就是这种经典关卡对象）。用户要求
+     「在游戏内预置 5 个测试关卡」——它们要覆盖全部机制、且必须与编辑器
+     所见一致，只能以**显式元素表**存在。规则：data.levels 按数组顺序排在
+     recipes 之前（order 从 1 起），recipes 顺次后移。 */
+  if(data&&Array.isArray(data.recipes)&&data.recipes.length){
+    const out=[];
+    /* ---- ① 前缀：显式关卡（测试关） ---- */
+    const pre=(data&&Array.isArray(data.levels))?data.levels:[];
+    const preN=pre.length;
+    pre.forEach((raw,i)=>{
+      if(!raw||!Array.isArray(raw.elements))return;
+      const kinds=new Set(raw.elements.map(e=>e&&e.type));
+      if(!kinds.has('goal')||!kinds.has('spawn'))return;   /* 与经典分支同规则 */
+      const lv=clone(raw);
+      lv.name=String(lv.name||('测试关 '+(i+1)));
+      lv.id=lv.id==null?(i+1):lv.id;
+      lv.chambers=Array.isArray(lv.chambers)&&lv.chambers.length?lv.chambers:[{id:'c1',x:0,y:0,w:200,h:88}];
+      lv.backgrounds=Array.isArray(lv.backgrounds)?lv.backgrounds:[];
+      if(!lv.backgrounds.length){const old=lv.elements.filter(e=>e&&e.type==='bg');if(old.length)lv.backgrounds=[{id:'legacy',layer:0,chambers:[{id:'legacyCanvas',x:0,y:0,w:600,h:400}],shapes:old.map(e=>Object.assign({},e,{type:'bgShape',shape:e.shape||'rect',shader:e.shader||'gradient',chamberId:'legacyCanvas'}))}];}
+      const order=i+1;
+      const r={key:'lx'+order+'#'+i,order,sec:{lv:lv},
+        get lv(){return this.sec.lv;},set lv(v){this.sec.lv=v;},
+        trophyIds:Array.isArray(lv.trophies)?lv.trophies.map(t=>t&&t.id).filter(Boolean):[],
+        name:lv.name,theme:lv.theme||'',_explicit:true};
+      out.push(r);
+    });
+    /* ---- ② 后缀：程序化配方（order 平移到前缀之后） ---- */
+    data.recipes.forEach((rec,i)=>{
+      if(!rec)return;
+      const lvName=String(rec.name||('第 '+(i+1)+' 关'));
+      const order=preN+(Number.isFinite(rec.i)?rec.i+1:(i+1));
+      /* rec 是骨架：lv 用 getter 延迟展开（首次访问时才调 genlib） */
+      const skeleton={lv:null};
+      Object.defineProperty(skeleton,'lv',{
+        configurable:true,enumerable:true,
+        get(){
+          if(this._lv)return this._lv;
+          const built=_materialize(rec);
+          if(!built)return null;
+          /* 套用与旧格式一致的后处理：id/名字/lives 等 */
+          built.name=lvName;built.id=built.id==null?(order):built.id;
+          built.initialLives=Math.max(1,Math.floor(built.initialLives||3));
+          built.initialFlags=Math.max(0,Math.floor(built.initialFlags||0));
+          this._lv=built;this._expanded=true;
+          /* LRU 记账（估算：元素约 200 个 × 约 120B + 背景约 90KB，取下限保守估） */
+          this._estBytes=40960;
+          _expOrder.push(this);_expBytes+=this._estBytes;
+          _expandEvict(this);
+          return built;
+        },
+        set(v){this._lv=v;}
+      });
+      const r={key:'lv'+order+'#'+i,order,sec:skeleton,preview:null,
+        get lv(){return this.sec.lv;},set lv(v){this.sec._lv=v;},
+        /* ★奖杯清单直接用配方里预存的 id，避免为了统计而展开全部 1000 关★ */
+        trophyIds:Array.isArray(rec.tro)?rec.tro:[],
+        name:lvName,theme:rec.theme||''};
+      out.push(r);
+    });
+    out.sort((a,b)=>a.order-b.order);
+    /* 缩略图：与旧格式同一套有界 LRU */
+    out.forEach(r=>_definePreview(r));
+    schedulePreviewPrewarm(out);
+    return out;
+  }
+  const source=Array.isArray(data)?data:(data&&Array.isArray(data.levels))?data.levels:(data&&data.level)?[data.level]:(data&&data.elements)?[data]:[];const out=[];
   source.forEach((raw,i)=>{if(!raw||!Array.isArray(raw.elements))return;const kinds=new Set(raw.elements.map(e=>e&&e.type));
     if(!kinds.has('goal')||!kinds.has('spawn'))return;const lv=clone(raw);
     lv.name=String(lv.name||('第 '+(i+1)+' 关'));lv.id=lv.id==null?(i+1):lv.id;
@@ -476,45 +1292,297 @@ function normalize(data){const source=Array.isArray(data)?data:(data&&Array.isAr
     const order=(()=>{const m=String(lv.id).match(/(\d+)/);return m?Number(m[1]):i+1;})();
     out.push({lv,key:'lv'+order+'#'+i,order,preview:null});});
   out.sort((a,b)=>a.order-b.order);
-  /* === 缩略图惰性化（启动性能关键修复） ===
+  /* === 缩略图惰性化 + 有界 LRU（启动性能 + 大规模地图稳定性） ===
      旧版在 normalize() 里对每关**同步**渲染 340x150 缩略图：20 关 × 约 250ms
      → 阻塞主线程 5~90 秒（视机型），这正是"关卡文件一大就加载不出来"的根因。
-     而 preview 只在**绘制选关页**时才被读（game.js / mobile-ui.js 各一处），
-     因此改为按需计算 + 缓存：启动时一次都不算，进入选关页只算当前可见的几张。
-     其余关卡用浏览器空闲时间后台预热，翻页时基本已就绪。 */
-  out.forEach(r=>{
-    let _pv;
-    Object.defineProperty(r,'preview',{
-      configurable:true,enumerable:true,
-      get(){if(_pv===undefined)_pv=preview(r.lv);return _pv;},
-      set(v){_pv=v;}
-    });
-  });
+     改为按需计算 + 缓存：启动时一次都不算，进入选关页只算当前可见的几张。
+     ★ 规模问题 ★：缩略图 340×150×4B ≈ 204KB/张。若无限缓存，1000 关就是 **195MB**
+       常驻内存（且大部分永远不再翻到）。这里改为**有界 LRU**：
+       只保留最近访问的 `PV_CACHE_MAX` 张（默认 48 = 约 9.4MB），
+       被淘汰的关卡下次翻到时重算（单张仅 5~7ms，无感）。 */
+  out.forEach(r=>_definePreview(r));
   schedulePreviewPrewarm(out);
   return out;}
+/* 惰性 BGM 预热：只把「窗口内那几关」喂给 AudioSystem.prewarm。
+   ★为什么不能直接传 Game.levels.map(r=>r.lv)★
+     AudioSystem 的音乐种子取自关卡内容（canonicalFeature 读 elements/backgrounds），
+     所以 prewarm 确实需要**真关卡对象**。但直接全量 map 会把 1000 关都展开。
+     做法：传一个**惰性数组**（元素用 getter，访问时才展开），
+     prewarm 内部只索引 [fromIdx, fromIdx+WINDOW)，因此只会展开那几关。 */
+function _lazyPrewarm(){
+  const start=Math.max(0,Game.selected|0);
+  const win=(AudioSystem.PREWARM_WINDOW||8)+2;
+  const arr=[];
+  for(let k=0;k<win&&start+k<Game.levels.length;k++){
+    const idx=start+k;
+    Object.defineProperty(arr,k,{configurable:true,enumerable:true,
+      get(){const r=Game.levels[idx];return r?r.lv:null;}});
+  }
+  arr.length=Math.min(win,Math.max(0,Game.levels.length-start));
+  /* 菜单/暂停轨排最前（prewarm 内部本来就 push 它们，这里无需重复） */
+  AudioSystem.prewarm(arr,0);
+}
+/* 缩略图有界 LRU（程序化分支与旧格式分支**共用同一套**，避免两条路径行为不一致）。
+   ★必须放在 normalize 之前或提升★：这里用函数声明（会提升），两条分支都能调。 */
+function _definePreview(r){
+  Object.defineProperty(r,'preview',{
+    configurable:true,enumerable:true,
+    get(){
+      /* 命中缓存的键 → 提到队尾（LRU touch） */
+      const idx=_pvOrder.indexOf(r);
+      if(idx>=0){_pvOrder.splice(idx,1);_pvOrder.push(r);return r._pv;}
+      const cv=preview(r.lv);
+      r._pv=cv;_pvOrder.push(r);_pvBytes+=204800;
+      /* 淘汰最旧的若干张，直到回到预算内 */
+      while(_pvOrder.length>PV_CACHE_MAX){
+        const old=_pvOrder.shift();
+        if(old&&old!==r){old._pv=undefined;_pvBytes-=204800;}
+      }
+      return cv;
+    },
+    set(v){r._pv=v;}
+  });
+}
+/* ★只读缓存、绝不触发计算★（选关页渲染路径专用）
+   背景：`r.preview` 是 getter，**未命中缓存时会同步现算**（实测手机单张约
+   12ms、一页 6 张 74ms＞50ms 长任务阈值）。若在 renderUI 里直接读 `r.preview`，
+   只要预热没赶上，这一帧就必然卡一下。
+   所以渲染路径改用 `peekPreview()`：
+     · 命中缓存 → 立刻拿到 canvas，零成本；
+     · 未命中   → 返回 null，画个占位（空槽），并让预热在后台补。
+   因为局外界面本来就逐帧重绘（frame() 每帧都调 renderUI），
+   预热算好后**下一帧缩略图自然出现**（轻微 pop-in，但绝无卡顿）。
+   —— 这是"用一帧的延迟换掉一次长任务"的取舍，选关页尤其值得。 */
+function peekPreview(rec){
+  if(!rec)return null;
+  if(_pvOrder.indexOf(rec)>=0)return rec._pv;
+  return null;
+}
 /* 空闲预热：一次算一关，绝不与交互抢主线程。
    刻意**跳过局内状态**（playing/pause/win/fail）：缩略图只在选关页用得到，
-   若在玩家操作时抢主线程算它会掉帧。等回到菜单/选关页再继续预热。 */
+   若在玩家操作时抢主线程算它会掉帧。等回到菜单/选关页再继续预热。
+   实测（_pvsplit.cjs）：单关 preview 的耗时 98% 在背景形状上，参数调优后
+   单关降到 5~7ms（低于 50ms 长任务阈值），因此这里的逐关预热不再制造卡顿；
+   但仍保留「一次一关 + 让路局内」的策略，避免极端机型上叠加成可感停顿。 */
+/* === 文字位图预热（消除"首次进选关页 58ms 长任务"） ===
+   实测（_lvline.cjs）：`text()` 对**未缓存**的字符串要 ~2.5ms（4 倍超采样 +
+   getImageData 回读 + 建 canvas）。首屏 3 张卡要画约 15 个字符串 + 描边变体
+   ⇒ 一次 ~58ms 长任务，正是"菜单→选关"那一次可感卡顿。
+   位图缓存键是 `size|ps|color|text`，**不含 mul**（缩放发生在绘制矩阵上），
+   所以这里按 (color,text) 预热一次，对所有字号都生效。
+   与 preview 一起放进同一个空闲循环：算完一关的缩略图，顺手把它那几个字符串也烘好。 */
+function warmLevelText(rec,i,per){
+  const S=(s,c)=>{try{_getPxTextBitmap(String(s),UI_STYLE.fontSize,c,UI_STYLE.pixelSize);}catch(e){}};
+  const num=String(i+1).padStart(2,'0');
+  /* ★名字用 rec.name（配方里已有），不要用 rec.lv.name★
+     后者会触发懒展开 —— 为了焐一个文字位图而展开整关（含约 90KB 背景）不值得。
+     （缩略图那一步本来就要展开，所以这里顺便省掉重复的 lv 访问。） */
+  const nm=rec.name!=null?rec.name:(rec.lv?rec.lv.name:'');
+  const tm=formatTime(Game.save.best[rec.key]);
+  /* ★★ 必须按"渲染真正请求的键"逐条焐 ★★
+     缓存键是 `size|ps|color|text`。实测漏掉任何一路颜色，进选关页就会冷烘：
+       textLeft()/textRight() 内部会先调 textW()，而 textW 固定用 **#ffffff**
+       ⇒ 凡走 textLeft/textRight 的字符串都多出一个白键，旧清单全漏了；
+       关卡名还带一层暗描边 rgba(5,3,14,0.70)（drawPixelText 的 outlineColor）；
+       关号在解锁/未解锁两态用不同色（金 / 极淡紫）。
+     下面把这三路色一次焐全（每关 10 个键、每个约 1ms），换掉"进页时同步冷烘 44 串
+     ≈ 79ms 长任务"。 */
+  /* 关号：textLeft → textW(#ffffff) + text(金 / 极淡) */
+  S(num,C.goldHi);S(num,C.inkFaint);S(num,'#ffffff');
+  /* 关卡名：textLeft → textW(#ffffff) + text(主色 / 极淡) + 暗描边 */
+  S(nm,C.ink);S(nm,C.inkFaint);S(nm,'#ffffff');S(nm,'rgba(5,3,14,0.70)');
+  /* 时间值：textRight / textLeft → textW(#ffffff) + text(金 / 柔) */
+  S(tm,C.goldHi);S(tm,C.inkSoft);S(tm,'#ffffff');
+}
+/* 页首固定元素预热（与关卡无关，整页只做一次）。
+   ★为什么要单独拆出来★：它一次要焐约十几个字符串（实测 20~30ms），
+   若塞在 i===0 那一关里，会让**第一次回调**叠加「缩略图 13ms + 页首 25ms」
+   = 38~44ms，逼近 50ms 长任务阈值，制造一笔无谓的卡顿。
+   拆开后：页首一次 ≤30ms、每关一次 ≤12ms，**单次回调稳定低于阈值**。
+   ★页码文字只焐「当前页 ± 1」★：1000 关手机端有 167 页，全焐会挤爆
+   _pxTextCache（上限 384），导致边焐边被驱逐，反而白做。 */
+function warmPageHeader(per,recs){
+  const S=(s,c)=>{try{_getPxTextBitmap(String(s),UI_STYLE.fontSize,c,UI_STYLE.pixelSize);}catch(e){}};
+  /* ★header() 的字符串必须一起焐★
+     `header()` 每帧都画「返回 / 标题」，实测单个字符串冷烘焙 1.7~5ms，
+     合起来 13.7ms —— 若留给首帧同步做，就是那笔残余卡顿的主要部分。
+     这里把标题、返回、奖杯、计数全部并入页首预热（一次性）。 */
+  /* ★标题与"返回"要把**三路颜色**都焐上★
+     PC：header() 画 text(标题, C.ink, ..., 'rgba(5,3,14,0.78)') ⇒ 主色 + 描边两键；
+     「返回」是普通按钮文字（C.ink，无描边）；
+     手机：header() 改走 styledText（渐变金 + basePs 0.25）⇒ 完全另一套缓存键。
+     旧清单只写了描边色、漏了主色，也没有 styledText 变体 ⇒ 手机端每次进页
+     都要冷烘「选择关卡」。三路补齐后两端都不再冷烘。 */
+  S('选择关卡',C.ink);S('选择关卡','rgba(5,3,14,0.78)');S('选择关卡','#ffffff');
+  S('返回',C.ink);S('返回','#ffffff');
+  S('设置',C.ink);S('游戏说明',C.ink);
+  /* 奖杯盘：`奖杯` + `已收集 / 总数`。
+     ★这里必须用**真实计数**（配方 rec.trophyIds 累加即可，不触发懒展开），
+       旧版写死 '0 / 0' ⇒ 真实值 '0 / 989' 永远冷烘。 */
+  let total=0;
+  if(recs){for(let k=0;k<recs.length;k++){const t=recs[k]&&recs[k].trophyIds;if(t)total+=t.length;}}
+  const taken=(()=>{let n=0;try{if(recs){for(let k=0;k<recs.length;k++){const r=recs[k];const ids=r&&r.trophyIds;if(!ids)continue;for(let q=0;q<ids.length;q++)if(Game.save.trophies[r.key+'::'+ids[q]])n++;}}}catch(e){}return n;})();
+  S('奖杯',C.inkSoft);S(taken+' / '+total,C.ink);
+  /* 页码：per 必须与**当前端的真实每页行数**一致（手机 6 / PC 3），
+     否则算出来的是"另一个页数"（167 vs 334），页码串照样冷烘。 */
+  const perN=Math.max(1,per||colsPerRow());
+  const pages=Math.max(1,Math.ceil(Game.levels.length/perN));
+  const cur=Math.max(0,Math.min(pages-1,Game.page|0));
+  for(let pg=cur-1;pg<=cur+1;pg++){
+    if(pg<0||pg>=pages)continue;
+    S('第 '+(pg+1)+' / '+pages+' 页',C.inkSoft);
+  }
+  S('尚无可用关卡',C.ink);
+  /* 关卡卡片上的固定字符串（每行都会画，且与关卡无关）——
+     放进页首一起焐，避免"每关都冷烘焙一次"的重复代价。 */
+  S('最快时间',C.inkFaint);S('最快时间','#ffffff');
+  S('进入',C.ink);S('未解锁',C.inkFaint);S('未解锁','rgba(5,3,14,0.80)');
+  S('已通关','rgba(134,217,201,0.82)');
+  S('◀',C.ink);S('▶',C.ink);
+  /* ★手机端 header() 走 styledText★：它内部是「白字位图 → 渐变上色 → 加描边」，
+     缓存键是 `s|mul|colors|outline|basePs`，与上面的颜色常量体系**完全不同**。
+     这里直接调 _styledBuild（只算不画）把它烘进 _styledCache。 */
+  try{_styledBuild('选择关卡',1.42,['#ffffff','#ffe98a','#e8a92c','#96630e'],3.0,0.25);}catch(e){}
+}
+/* 空闲预热：一次算一关，绝不与交互抢主线程。
+   刻意**跳过局内状态**（playing/pause/win/fail）：缩略图只在选关页用得到，
+   若在玩家操作时抢主线程算它会掉帧。等回到菜单/选关页再继续预热。
+   实测（_pvsplit.cjs）：单关 preview 的耗时 98% 在背景形状上，参数调优后
+   单关降到 5~7ms（低于 50ms 长任务阈值），因此这里的逐关预热不再制造卡顿；
+   但仍保留「一次一关 + 让路局内」的策略，避免极端机型上叠加成可感停顿。
+
+   ★★ 滚动窗口（支撑 1000+ 关）★★
+     旧版从第 0 关一路预热到最后一关。20 关时没问题，但 1000 关时：
+       ① 要跑 1000 × (缩略图 5~7ms + 文字位图) ≈ 8~15 秒的持续占用
+       ② 更重要的是，**缩略图缓存只有 48 张（有界 LRU）**，
+          预热到第 100 关时前 48 张已被驱逐 ⇒ 前面 900 多关的预热**纯属白做**
+     改为「只预热当前页 + 前后各一页」：
+       · 总和 ≤ 3 页 ≈ 36 关，远小于 LRU 48 张 ⇒ 预热结果**真的会保留**
+       · 翻页时重新对准窗口（followPage），只补新露出的那几关
+     ——与音频 prewarm 的 PREWARM_WINDOW 思路一致。 */
+let _prewarmRecs=null,_prewarmI=0,_prewarmPer=3,_prewarmLive=false,_prewarmHdrDone=false;
+/* 预热顺序：**当前页优先**，然后上一页、下一页。
+   为什么不是"从上一页顺序扫到下一页"：用户进选关页时眼睛先看当前页，
+   若从上一页开头扫，当前页的 6 张要等 6×32ms ≈ 190ms 才陆续出现（pop-in 太慢）。
+   按优先级排后，当前页第 1 张在**第一次空闲回调**后就能出现。 */
+function _prewarmOrder(){
+  const per=_prewarmPer>0?_prewarmPer:3;
+  const page=Math.max(0,Game.page|0);
+  const N=Game.levels.length;
+  const seg=p=>{const a=Math.max(0,p*per),b=Math.min(N,(p+1)*per),out=[];
+    for(let k=a;k<b;k++)out.push(k);return out;};
+  return {order:seg(page).concat(seg(page-1),seg(page+1)),per};
+}
+function _prewarmWindow(){
+  /* 兼容旧调用点：返回窗口区间（当前页 ±1 页） */
+  const {order}=_prewarmOrder();
+  return {from:order.length?order[0]:0,to:order.length?order[order.length-1]+1:0};
+}
 function schedulePreviewPrewarm(recs){
   if(!recs||!recs.length)return;
-  let i=0;
-  const busy=()=>{
-    const s=Game&&Game.state;
-    return s==='playing'||s==='pause'||s==='win'||s==='fail';
-  };
-  const step=()=>{
-    if(i>=recs.length)return;
-    if(busy()){scheduleNext();return;}      /* 局内 → 让路，稍后再试 */
-    try{void recs[i++].preview;}catch(e){}
-    scheduleNext();
-  };
-  const scheduleNext=()=>{
-    if(window.requestIdleCallback)requestIdleCallback(step,{timeout:2000});
-    else setTimeout(step,120);
-  };
-  const kick=()=>scheduleNext();
-  if(document.readyState==='complete')setTimeout(kick,1200);
-  else window.addEventListener('load',()=>setTimeout(kick,1200),{once:true});
+  _prewarmRecs=recs;
+  /* ★不要在这里用 colsPerRow() 覆盖 _prewarmPer★
+     手机端选关是竖排列表，per 由竖屏高度算出（2~6），与 PC 的横向列数不同。
+     手机版进入选关页时会调 alignPreviewPrewarm(per) 显式对齐；
+     这里只在**尚未被显式设定过**时才用 PC 口径兜底。 */
+  if(!(_prewarmPer>0))_prewarmPer=colsPerRow();
+  _prewarmI=0;
+  _prewarmLive=true;
+  /* 页首固定元素（只焐一次），交给 pump 的第一刀顺带做掉。 */
+  _prewarmHdrDone=false;
+}
+
+/* ★★ 帧预算预热泵 ★★（手机端选关卡顿的真正解法）
+   ▍为什么不能再用 requestIdleCallback（实测数据）
+     浏览器在**持续 rAF 重绘**（本游戏局外界面每帧都在画）时，会把 idle 回调
+     排到很后面 —— 实测每 2~4 秒才执行一次 "算 1 关"。而一页要 6 关
+     ⇒ 进入选关页时预热**永远追不上**，于是 6 张缩略图被同步现算，
+     单帧 82.6ms（> 50ms 长任务阈值）⇒ 用户感到的"明显卡顿"。
+   ▍解法：把预热切进**游戏自己的帧循环**，每帧只花固定预算（默认 5ms）
+     挂到 frame() 末尾调用。好处：
+       · 每帧都保证推进（不像 idle 会被饿死）
+       · 单帧增量 ≤5ms ⇒ 绝不制造长任务、不掉帧
+       · 一页 6 张 ≈ 82ms ⇒ 约 16 帧 ≈ 270ms 补齐，用户几乎无感（pop-in）
+       · 局内（playing/pause/win/fail）直接 return ⇒ 不抢玩家操作的主线程 */
+const PREWARM_BUDGET_MS=5;
+/* 选关页附近放宽预算：此时玩家正在看关卡列表，"缩略图尽快出现"的收益
+   远大于"每帧多花几毫秒"。实测单张缩略图 ≈12ms、每关文字 ≈11ms，
+   预算放到 14ms 可保证**每帧稳定完成一整关**（缩略图+文字），
+   且 14ms 仍远低于 50ms 长任务阈值、60fps 下也留足 2ms 余量。 */
+const PREWARM_BUDGET_LEVELS_MS=14;
+function pumpPreviewPrewarm(budgetMs){
+  if(!_prewarmLive||!_prewarmRecs)return;
+  const s=Game&&Game.state;
+  if(s==='playing'||s==='pause'||s==='win'||s==='fail')return;   /* 局内让路 */
+  const onLevels=(s==='levels');
+  const budget=(budgetMs==null?(onLevels?PREWARM_BUDGET_LEVELS_MS:PREWARM_BUDGET_MS):budgetMs);
+  const t0=performance.now();
+  /* ★页首固定元素必须最先热★
+     它包含"选择关卡 / 返回 / 奖杯 / 0 / 0 / 第 N / M 页"等**每帧都要画的字符串**。
+     首帧若未预热，光 `header()` 就要 13.7ms（实测），叠加其它字符串可达 55ms。
+     所以这里**无条件优先**做它，且不吃预算（它是一次性的）。 */
+  if(!_prewarmHdrDone){
+    try{warmPageHeader(_prewarmPer,_prewarmRecs);}catch(e){}
+    _prewarmHdrDone=true;
+    /* 页首那一刀可能已超预算 ⇒ 本轮到此为止，下一帧再开始算缩略图 */
+    return;
+  }
+  /* 每轮重新按**当前页优先级**取顺序：翻页后自动优先新页 */
+  const {order}=_prewarmOrder();
+  if(!order.length)return;
+  /* ★★ 每个"工作单元"只做一件事 ★★
+     实测：一张缩略图 ≈18ms、一关文字 ≈10ms。旧写法把两者塞进同一次循环迭代
+     ⇒ 单帧 28~31ms（手机直接掉到 30fps）。这里改成**每帧最多做一件事**：
+       ① 窗口内还有缺的缩略图 → 只算一张就收手（可见性最强，优先）；
+       ② 缩略图齐了 → 每帧只焐**一关**的文字（10 个键）；
+       ③ 全部就绪 → 直接返回待命。
+     用 rec._txtW 记录"该关文字已按哪种锁定态焐过"，避免重复劳动；
+     关卡被通关后 locked 态会变（关号换色），标记随之失效并自动重焐。 */
+  while(performance.now()-t0<budget){
+    /* ① 缩略图：窗口内第一个还没算的 */
+    let did=false;
+    for(let k=0;k<order.length;k++){
+      const rec=_prewarmRecs[order[k]];
+      if(rec&&_pvOrder.indexOf(rec)<0){try{void rec.preview;}catch(e){}did=true;break;}
+    }
+    if(!did){
+      /* ② 文字：窗口内第一关还没焐（或锁定态变了）的 */
+      for(let k=0;k<order.length;k++){
+        const idx=order[k],rec=_prewarmRecs[idx];
+        if(!rec)continue;
+        const tag=unlocked(idx)?'1':'0';
+        if(rec._txtW===tag)continue;
+        try{warmLevelText(rec,idx,_prewarmPer);}catch(e){}
+        rec._txtW=tag;did=true;break;
+      }
+    }
+    if(!did)return;                                   /* 窗口内全部就绪 */
+    /* 一件就够（缩略图那件本身已超预算）⇒ 本帧到此为止，下一帧继续 */
+    break;
+  }
+}
+/* 翻页时调用：把预热游标重新对准新页（已在窗口内的不重复算）。
+   ★可选参数 per★：手机端选关是**竖排列表**，每页行数由竖屏高度算出，
+   与 PC 的 colsPerRow()（横向网格列数）不是同一个量。若不显式告知，
+   手机端预热算的就是"别的页"⇒ 真正的当前页缩略图仍要绘制时**同步现算**，
+   于是翻页/首屏又串成一条长任务。手机版在算完 per 后调用本函数对齐。 */
+function refocusPreviewPrewarm(per){
+  const np=Number(per)>0?Math.max(1,Math.floor(per)):_prewarmPer;
+  /* ★per 变了 ⇒ 页数也变 ⇒ 页码串（'第 N / M 页'）必须重焐★
+     手机端竖屏 per=6（167 页）、PC per=3（334 页），同一个 '第 1 页' 也是两个串。
+     若不重焐，切到另一边时页码要冷烘（实测单串 2.6ms，加上其它串就是一笔长任务）。 */
+  if(np!==_prewarmPer){_prewarmPer=np;_prewarmHdrDone=false;}
+  if(!_prewarmLive||!_prewarmRecs)return;
+  /* 优先级顺序变了（当前页换了）⇒ 游标归零重新从"新的当前页"开始 */
+  _prewarmI=0;
+}
+/* 供手机端在进入选关页时显式对齐预热窗口（见 refocusPreviewPrewarm 注释）。
+   ★为什么不直接让 mobile-ui.js 改 _prewarmPer★：它是顶层 `let`，
+   跨脚本可写但**容易被后续 schedulePreviewPrewarm 用 colsPerRow() 覆盖**。
+   统一走这个入口，保证"对齐"这件事只有一处实现。
+   ★per 变了要重焐页首★（页码串随 per 变），故显式调 refocusPreviewPrewarm(per)。 */
+function alignPreviewPrewarm(per){
+  refocusPreviewPrewarm(per);
 }
 /* === 选关缩略图：只画「出生点一屏」（摄像机视口大小） ===
    旧实现把**整个箱庭包围盒**（实测可达 2600×616）连同全部背景形状（253~482 个）
@@ -549,18 +1617,33 @@ function preview(lv){const c=document.createElement('canvas');c.width=340;c.heig
      共享一块小画布、过采样、每格最多覆盖若干画布像素、不写持久缓存。
      此前直接走正常路径：每个形状都按真实尺寸（最大 3150x1432）独立占一块
      离屏画布且永不释放 → 启动被阻塞近 90 秒、4K 下直接崩渲染进程。
-     参数经 _budgetsweep2.cjs 扫描取"性价比拐点"：50 关背景耗时
-     24.9s → 1.39s（约 18 倍），而缩略图实际显示尺寸远小于此预算，
-     画质无可见损失。 */
-  if(typeof _bgEphBegin==='function')_bgEphBegin(256,2500,z,1,4);
+    参数经 _pvsweep.cjs / _pvsplit.cjs 实测重扫取"性价比拐点"：
+    · 拆分实测：单关 preview 的耗时 **98% 在背景形状**（20 关 194ms），
+      元素绘制 + 邻接计算合计仅 3ms —— 因此优化只需打背景这一处。
+    · 参数扫描（20 关合计 / 单关最大 / 画质代理）：
+        256/2500/1 → 757ms / 113ms      ← 旧值，单关一次就是长任务
+        192/1400/1 → 325ms /  28ms
+        128/600/1  → 158ms /  12.4ms
+         96/260/1  →  90ms /   7.3ms    ← 采用（单关已低于 50ms 长任务阈值）
+         64/140/1  →  56ms /   5.2ms
+      缩略图实际显示仅 ~226×128（手机上更小），96px 超采样已远超可分辨精度。
+    · 结果：单关 12~57ms → 5~7ms，**空闲预热时不再产生任何长任务**。 */
+  if(typeof _bgEphBegin==='function')_bgEphBegin(96,260,z,1,4);
   try{
     for(const bg of lv.backgrounds.slice().sort((a,b2)=>(a.layer||0)-(b2.layer||0)))for(const s of bg.shapes||[]){if(!hit(s,60))continue;try{drawBgShape(q,s,s.x,s.y,s.w,s.h,s.alpha==null?.8:s.alpha,0,false,true,[],z);}catch(e){}}
   }finally{if(typeof _bgEphEnd==='function')_bgEphEnd();}
   for(const e of lv.elements){if(e.type!=='bg'&&!hit(e,40))continue;const a=getAdjacency(e,lv.elements);switch(e.type){case'platform':drawPlatformTo(q,e,a);break;case'ice':drawIceTo(q,e,a);break;case'movable':drawMovableTo(q,e,a);break;case'breakable':drawBreakableTo(q,e,a);break;case'flammable':drawFlammableTo(q,e,a);break;case'water':drawWaterTo(q,e,false);break;case'goal':drawGoalPortalShader(q,e,0);break;case'trophy':drawTrophyTo(q,e);break;case'switchDoor':drawSwitchDoorTo(q,e,false);break;case'switch':drawSwitchTo(q,e,false);break;case'gravityFlip':drawGravityZoneShader(q,e,0);break;case'door':q.fillStyle='#c19748';q.fillRect(e.x,e.y,e.w,e.h);break;case'spike':case'fallingSpike':q.fillStyle='#cf4e65';q.beginPath();q.moveTo(e.x,e.y+e.h);q.lineTo(e.x+e.w/2,e.y);q.lineTo(e.x+e.w,e.y+e.h);q.fill();break;case'spawn':q.fillStyle='#6affa9';q.fillRect(e.x,e.y-8,8,8);break;case'flagPickup':q.fillStyle='#edce61';q.fillRect(e.x,e.y,6,4);break;case'heart':q.fillStyle='#e46376';q.fillRect(e.x,e.y,7,6);break;case'laserRight':case'laserLeft':case'laserUp':case'laserDown':q.fillStyle='#ff4d6a';q.fillRect(e.x,e.y,7,7);break;case'disappear':q.fillStyle='rgba(190,170,255,.75)';q.fillRect(e.x,e.y,Math.max(6,e.w),Math.max(4,e.h));break;}}
   q.restore();return c;}
-function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/3)-1));Game.ready=true;screenKey='';}
+function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);
+  /* 页数按**实际列数**算（旧版写死 /3，宽屏铺 4~6 列时最后一页会算错），
+     1000 关时这个偏差会放大到十几页。 */
+  const per=Math.max(1,colsPerRow());
+  Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/per)-1));
+  Game.ready=true;screenKey='';}
 ['playScreen','playCanvas','playCanvasWrap','playInfo','playWin','playControls'].forEach(k=>D[k]=document.getElementById(k));
 resize();loadLevels();requestAnimationFrame(frame);
 window.GameAPI={begin,pause,normalize,loadLevels,formatTime,unlocked,resetProgress,simulation,change,
   transitioning:()=>fxBusy||(window.SceneFX?SceneFX.isPlaying():false),
-  getState:()=>({state:Game.state,elapsed:Game.elapsed,simTime:Game.simTime,level:Game.selected,lives:Play.lives,flags:Play.flagsCollected,save:clone(Game.save),levels:Game.levels.map(r=>({name:r.lv.name,key:r.key})),audio:AudioSystem.debug()})};
+  /* 调试用状态。★levels 不能用 r.lv.name★（会展开全部 1000 关）——
+     程序化关卡下名字就存在记录本身（r.name），直接用。 */
+  getState:()=>({state:Game.state,elapsed:Game.elapsed,simTime:Game.simTime,level:Game.selected,lives:Play.lives,flags:Play.flagsCollected,save:clone(Game.save),levels:Game.levels.map(r=>({name:r.name!=null?r.name:(r.lv?r.lv.name:''),key:r.key})),audio:AudioSystem.debug()})};
