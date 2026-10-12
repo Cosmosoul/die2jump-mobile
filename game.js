@@ -123,6 +123,14 @@ function text(s,x,y,color=C.ink,mul=1,alpha=1,outline=null){g.save();if(alpha!==
 function textW(s,mul=1){const b=_getPxTextBitmap(String(s),UI_STYLE.fontSize,'#ffffff',UI_STYLE.pixelSize);return b.w*UI_STYLE.pixelSize*mul;}
 function textLeft(s,x,y,color=C.ink,mul=1,alpha=1){text(s,x+textW(s,mul)/2,y,color,mul,alpha);}
 function textRight(s,x,y,color=C.ink,mul=1,alpha=1){text(s,x-textW(s,mul)/2,y,color,mul,alpha);}
+/* ★按可用宽度截断文字（超出补「…」）★
+   关卡名可能很长（如「测试关 1 · 基础与危险」）：居中/左对齐绘制会顶出卡片边缘，
+   或压到右侧「进入 / 未解锁」上。按实测宽度截断，保证排版不被撑破。 */
+function fitName(s,maxW,mul=1){s=String(s==null?'':s);if(textW(s,mul)<=maxW+0.5)return s;const ell='…';let out='';for(let i=0;i<s.length;i++){const t=out+s[i];if(textW(t+ell,mul)>maxW)break;out=t;}return out+ell;}
+/* ★放不下时先自动缩字号，仍放不下才截断★
+   关卡名是卡片上最醒目的文字，直接截断会让玩家看不到自己的关卡叫什么。
+   这里在 [minMul, mul] 之间等比缩小到刚好放下；缩到下限还放不下才补「…」。 */
+function fitText(s,maxW,mul=1,minMul=0.78){s=String(s==null?'':s);let m=mul;if(textW(s,m)>maxW){m=Math.max(minMul,m*maxW/textW(s,m));}return {s:fitName(s,maxW,m),mul:m};}
 /* ★数字型「每帧都在变」的文字：逐字位图合成★
    典型场景 = 局内 HUD 计时器（`00:12.34`）。若沿用 text() 的**整串**缓存，
    字符串每帧都不同 ⇒ 每帧必然 cache miss ⇒ 每帧新建两个 canvas +
@@ -476,7 +484,7 @@ async function begin(i){if(!Game.levels[i]||!unlocked(i)||Entering)return;Enteri
     /* ★LevelContext.levels 必须是「稀疏数组」★
        runtime 只在 5 处访问它，且**全部都是 levels[currentIdx]**（已核实：
        runtime.js 4215 / 5210 / 5318 / 5350 / 5408）。
-       所以这里不能 `.map(r=>r.lv)` —— 那会把 1000 关全展开。
+       所以这里不能 `.map(r=>r.lv)` —— 那会把全部关卡都展开。
        改为放一个稀疏数组，只在 currentIdx 位置放入当前关卡
        （runtime 用 `if(!lv)return;` 守卫缺失项，稀疏是安全的）。 */
     if(!LevelContext.levels||LevelContext.levels.length!==Game.levels.length){
@@ -761,7 +769,7 @@ async function startGame(){if(Game.state!=='boot'||bootArmed)return;bootArmed=tr
   AudioSystem.setVolumes(Game.save.music,Game.save.sfx);change('menu',{noFx:true});
   /* 后台空闲预热 BGM：之后进任何关卡都是零延迟、音乐立刻正确。
      同时把菜单轨也补进预热队列 —— 它刚才没被前台等完，需要继续算完。
-     ★不能 `Game.levels.map(r=>r.lv)`★：程序化关卡下那会把 1000 关全展开。
+     ★不能 `Game.levels.map(r=>r.lv)`★：那会把全部关卡都展开。
      音频的种子取自关卡内容（canonicalFeature），所以确实需要展开，
      但只展开「窗口内那几关」即可 —— prewarm 第二个参数就是窗口起点。
      这里传**惰性访问数组**（用 proxy 风格的 getter 数组），
@@ -805,10 +813,9 @@ function header(title,sub){button('back','返回',28,30,116,44,()=>change('menu'
 function trophyPlate(ex,ey,taken,total){const w=228,h=52,x=ex-w,y=ey;panel(x,y,w,h,{tone:'gold'});icon('trophy',x+36,y+h/2,2.1);text('奖杯',x+80,y+21,C.inkSoft,1.06);text(`${taken} / ${total}`,x+176,y+32,C.ink,1.42);}
 /* --------------------------------------------------------------- 选择关卡 */
 function levels(){skyMotes();
-  /* ★奖杯统计不能遍历 r.lv.elements★
-     程序化关卡下 r.lv 是**懒展开**的：为了数奖杯而访问 1000 个 r.lv
-     会把全部 1000 关都展开（约 114MB + 数百 ms），彻底抵消懒加载的意义。
-     配方里已预存 trophyIds（打包时算好的），优先用它。 */
+  /* ★奖杯统计优先用 r.trophyIds★
+     关卡记录里若已预存 trophyIds 就直接用，避免为统计而遍历每关的 elements
+     （关卡很多时这是一笔可观的开销）。没有预存时回退到遍历 elements。 */
   const all=Game.levels.flatMap(r=>{
     const ids=r.trophyIds!=null?r.trophyIds:(r.lv&&r.lv.elements?r.lv.elements.filter(e=>e.type==='trophy').map(e=>e.id):[]);
     return ids.map(id=>r.key+'::'+id);
@@ -849,7 +856,8 @@ function levels(){skyMotes();
     /* —— 文字区（自下而上定位，确保与按钮零重叠）—— */
     const btnH=42,btnY=y+ch-pad-btnH;
     const statY=btnY-26;                                          /* 数据行中心 */
-    text(r.lv.name,x+cw/2,statY-56,on?C.ink:C.inkFaint,1.60,1,'rgba(5,3,14,0.70)');   /* 关卡名：最大 */
+    const _nm=fitText(r.lv.name,cw-14,1.60);                                        /* 关卡名：最大（先缩字号、再截断） */
+    text(_nm.s,x+cw/2,statY-56,on?C.ink:C.inkFaint,_nm.mul,1,'rgba(5,3,14,0.70)');
     textLeft('最快时间',x+pad+2,statY,C.inkFaint,.96);                                  /* 标签：最小最淡 */
     /* 无纪录时用 inkSoft（而非 inkFaint）：占位符 `--:--.--` 在暗卡上若太淡会像"没渲染出来" */
     textRight(formatTime(Game.save.best[r.key]),x+cw-pad-2,statY,
@@ -1169,115 +1177,16 @@ if(!window.MOBILE_MODE)window.addEventListener('resize',resize);
 /* ------------------------------------------------------------ 关卡载入 */
 const _pvOrder=[];let _pvBytes=0;
 /* 缩略图有界 LRU 预算：48 张 × 340×150×4B ≈ 9.4MB。
-   1000 关若无限缓存是 195MB 常驻（且大部分永远不再翻到）。 */
+   关卡很多时若无限缓存会吃掉大量常驻内存（且大部分永远不再翻到）。 */
 const PV_CACHE_MAX=48;
 /* ══════════════════════════════════════════════════════════════════════════
-   ★程序化关卡（Procedural Levels）—— 支撑 100~1000+ 关不卡顿★
+   ★关卡来源★ —— 只读 levels.js 的 `levels` 数组（编辑器导出的经典关卡）
    ══════════════════════════════════════════════════════════════════════════
-   ▍问题（实测）
-     每关 JSON 约 97KB，其中 93.7% 是背景视差形状。
-     1000 关若全部内联进 levels.js = **94.6MB**，浏览器同步解析要数十秒，
-     且全程卡死主线程 —— 与「任何环节绝对不会卡顿」直接冲突。
-
-   ▍解法
-     levels.js 只存「配方」（idx + 名字 + 主题 + 奖杯 id，约 80B/关），
-     真正的地形与背景由 levels.genlib.js（浏览器版生成器）**按需重算**。
-     生成器是完全确定性的（同 idx 跨进程 md5 一致，无 Math.random/Date.now），
-     已实测 genlib 与 Node 端输出**逐字节一致**（lvgen/_genlib_test.cjs）。
-     压缩比约 1200:1（94.6MB → 约 80KB）。
-
-   ▍展开时机（★这是"上千关也不卡"的关键★）
-     启动        → 只读 recipes，**不展开任何地形**（< 5ms）
-     进选关页    → 展开当前可见页 + 邻页
-     进关        → 展开那一关（单关约 0.6ms）
-     展开结果走有界 LRU，常驻内存受控（见 _expandEvict）
-
-   ▍向后兼容
-     data.levels 有值（旧格式）→ 走原路径，完全不经过本层。
-     只有 data.recipes 存在时才启用懒展开。 */
-const _expOrder=[];let _expBytes=0;
-const EXP_MAX=64;                          /* 展开缓存上限（64 关 ≈ 2.5MB 元素 + 背景按需） */
-function _materialize(rec){
-  /* 用 genlib 按配方重建 c 完整关卡对象 */
-  const LG=window.LevelGen;
-  if(!LG||typeof LG.build!=='function')return null;
-  try{return LG.build(rec.i);}catch(e){return null;}
-}
-function _expandEvict(keep){
-  while(_expOrder.length>EXP_MAX){
-    const old=_expOrder.shift();
-    if(!old||old===keep)continue;
-    old._lv=undefined;old._expanded=false;_expBytes-=old._estBytes||0;
-  }
-}
+   游戏**不做任何关卡生成**：所有关卡都保存在根目录的 levels.js 里。
+   流程：编辑器做好关卡 →「保存」导出 levels.js → 复制到游戏根目录覆盖同名文件
+        → 游戏里就是你自己做的全部关卡（编辑器所见 = 游戏里玩到）。
+   下面兼容 data 直接是数组 / 单关对象 / 元素表等旧写法。 */
 function normalize(data){
-  /* === 程序化分支：只建配方骨架，地形延迟到真正要用时才展开 ===
-     ★v2 新增 `data.levels` 前缀★：允许在程序化关卡**之前**插入少量
-     "手工/测试关卡"（编辑器导出的就是这种经典关卡对象）。用户要求
-     「在游戏内预置 5 个测试关卡」——它们要覆盖全部机制、且必须与编辑器
-     所见一致，只能以**显式元素表**存在。规则：data.levels 按数组顺序排在
-     recipes 之前（order 从 1 起），recipes 顺次后移。 */
-  if(data&&Array.isArray(data.recipes)&&data.recipes.length){
-    const out=[];
-    /* ---- ① 前缀：显式关卡（测试关） ---- */
-    const pre=(data&&Array.isArray(data.levels))?data.levels:[];
-    const preN=pre.length;
-    pre.forEach((raw,i)=>{
-      if(!raw||!Array.isArray(raw.elements))return;
-      const kinds=new Set(raw.elements.map(e=>e&&e.type));
-      if(!kinds.has('goal')||!kinds.has('spawn'))return;   /* 与经典分支同规则 */
-      const lv=clone(raw);
-      lv.name=String(lv.name||('测试关 '+(i+1)));
-      lv.id=lv.id==null?(i+1):lv.id;
-      lv.chambers=Array.isArray(lv.chambers)&&lv.chambers.length?lv.chambers:[{id:'c1',x:0,y:0,w:200,h:88}];
-      lv.backgrounds=Array.isArray(lv.backgrounds)?lv.backgrounds:[];
-      if(!lv.backgrounds.length){const old=lv.elements.filter(e=>e&&e.type==='bg');if(old.length)lv.backgrounds=[{id:'legacy',layer:0,chambers:[{id:'legacyCanvas',x:0,y:0,w:600,h:400}],shapes:old.map(e=>Object.assign({},e,{type:'bgShape',shape:e.shape||'rect',shader:e.shader||'gradient',chamberId:'legacyCanvas'}))}];}
-      const order=i+1;
-      const r={key:'lx'+order+'#'+i,order,sec:{lv:lv},
-        get lv(){return this.sec.lv;},set lv(v){this.sec.lv=v;},
-        trophyIds:Array.isArray(lv.trophies)?lv.trophies.map(t=>t&&t.id).filter(Boolean):[],
-        name:lv.name,theme:lv.theme||'',_explicit:true};
-      out.push(r);
-    });
-    /* ---- ② 后缀：程序化配方（order 平移到前缀之后） ---- */
-    data.recipes.forEach((rec,i)=>{
-      if(!rec)return;
-      const lvName=String(rec.name||('第 '+(i+1)+' 关'));
-      const order=preN+(Number.isFinite(rec.i)?rec.i+1:(i+1));
-      /* rec 是骨架：lv 用 getter 延迟展开（首次访问时才调 genlib） */
-      const skeleton={lv:null};
-      Object.defineProperty(skeleton,'lv',{
-        configurable:true,enumerable:true,
-        get(){
-          if(this._lv)return this._lv;
-          const built=_materialize(rec);
-          if(!built)return null;
-          /* 套用与旧格式一致的后处理：id/名字/lives 等 */
-          built.name=lvName;built.id=built.id==null?(order):built.id;
-          built.initialLives=Math.max(1,Math.floor(built.initialLives||3));
-          built.initialFlags=Math.max(0,Math.floor(built.initialFlags||0));
-          this._lv=built;this._expanded=true;
-          /* LRU 记账（估算：元素约 200 个 × 约 120B + 背景约 90KB，取下限保守估） */
-          this._estBytes=40960;
-          _expOrder.push(this);_expBytes+=this._estBytes;
-          _expandEvict(this);
-          return built;
-        },
-        set(v){this._lv=v;}
-      });
-      const r={key:'lv'+order+'#'+i,order,sec:skeleton,preview:null,
-        get lv(){return this.sec.lv;},set lv(v){this.sec._lv=v;},
-        /* ★奖杯清单直接用配方里预存的 id，避免为了统计而展开全部 1000 关★ */
-        trophyIds:Array.isArray(rec.tro)?rec.tro:[],
-        name:lvName,theme:rec.theme||''};
-      out.push(r);
-    });
-    out.sort((a,b)=>a.order-b.order);
-    /* 缩略图：与旧格式同一套有界 LRU */
-    out.forEach(r=>_definePreview(r));
-    schedulePreviewPrewarm(out);
-    return out;
-  }
   const source=Array.isArray(data)?data:(data&&Array.isArray(data.levels))?data.levels:(data&&data.level)?[data.level]:(data&&data.elements)?[data]:[];const out=[];
   source.forEach((raw,i)=>{if(!raw||!Array.isArray(raw.elements))return;const kinds=new Set(raw.elements.map(e=>e&&e.type));
     if(!kinds.has('goal')||!kinds.has('spawn'))return;const lv=clone(raw);
@@ -1290,13 +1199,14 @@ function normalize(data){
     lv.feel=sanitizeFeel(lv.feel||(data&&data.feel));lv.camera=lv.camera||{};
     lv.initialLives=Math.max(1,Math.floor(lv.initialLives||3));lv.initialFlags=Math.max(0,Math.floor(lv.initialFlags||0));
     const order=(()=>{const m=String(lv.id).match(/(\d+)/);return m?Number(m[1]):i+1;})();
-    out.push({lv,key:'lv'+order+'#'+i,order,preview:null});});
+    /* trophyIds 预存：选关页统计奖杯时直接用，避免每帧扫全部元素 */
+    out.push({lv,key:'lv'+order+'#'+i,order,preview:null,name:lv.name,theme:lv.theme||'',trophyIds:lv.elements.filter(e=>e.type==='trophy').map(e=>e.id)});});
   out.sort((a,b)=>a.order-b.order);
   /* === 缩略图惰性化 + 有界 LRU（启动性能 + 大规模地图稳定性） ===
      旧版在 normalize() 里对每关**同步**渲染 340x150 缩略图：20 关 × 约 250ms
      → 阻塞主线程 5~90 秒（视机型），这正是"关卡文件一大就加载不出来"的根因。
      改为按需计算 + 缓存：启动时一次都不算，进入选关页只算当前可见的几张。
-     ★ 规模问题 ★：缩略图 340×150×4B ≈ 204KB/张。若无限缓存，1000 关就是 **195MB**
+     ★ 规模问题 ★：缩略图 340×150×4B ≈ 204KB/张。若无限缓存，上千关就是**数百 MB**
        常驻内存（且大部分永远不再翻到）。这里改为**有界 LRU**：
        只保留最近访问的 `PV_CACHE_MAX` 张（默认 48 = 约 9.4MB），
        被淘汰的关卡下次翻到时重算（单张仅 5~7ms，无感）。 */
@@ -1306,7 +1216,7 @@ function normalize(data){
 /* 惰性 BGM 预热：只把「窗口内那几关」喂给 AudioSystem.prewarm。
    ★为什么不能直接传 Game.levels.map(r=>r.lv)★
      AudioSystem 的音乐种子取自关卡内容（canonicalFeature 读 elements/backgrounds），
-     所以 prewarm 确实需要**真关卡对象**。但直接全量 map 会把 1000 关都展开。
+     所以 prewarm 确实需要**真关卡对象**。但直接全量 map 会把全部关卡都展开。
      做法：传一个**惰性数组**（元素用 getter，访问时才展开），
      prewarm 内部只索引 [fromIdx, fromIdx+WINDOW)，因此只会展开那几关。 */
 function _lazyPrewarm(){
@@ -1322,7 +1232,7 @@ function _lazyPrewarm(){
   /* 菜单/暂停轨排最前（prewarm 内部本来就 push 它们，这里无需重复） */
   AudioSystem.prewarm(arr,0);
 }
-/* 缩略图有界 LRU（程序化分支与旧格式分支**共用同一套**，避免两条路径行为不一致）。
+/* 缩略图有界 LRU（按需计算 + 缓存，避免启动时一次性同步渲染全部缩略图）。
    ★必须放在 normalize 之前或提升★：这里用函数声明（会提升），两条分支都能调。 */
 function _definePreview(r){
   Object.defineProperty(r,'preview',{
@@ -1399,7 +1309,7 @@ function warmLevelText(rec,i,per){
    若塞在 i===0 那一关里，会让**第一次回调**叠加「缩略图 13ms + 页首 25ms」
    = 38~44ms，逼近 50ms 长任务阈值，制造一笔无谓的卡顿。
    拆开后：页首一次 ≤30ms、每关一次 ≤12ms，**单次回调稳定低于阈值**。
-   ★页码文字只焐「当前页 ± 1」★：1000 关手机端有 167 页，全焐会挤爆
+   ★页码文字只焐「当前页 ± 1」★：关卡很多时手机端有上百页，全焐会挤爆
    _pxTextCache（上限 384），导致边焐边被驱逐，反而白做。 */
 function warmPageHeader(per,recs){
   const S=(s,c)=>{try{_getPxTextBitmap(String(s),UI_STYLE.fontSize,c,UI_STYLE.pixelSize);}catch(e){}};
@@ -1452,7 +1362,7 @@ function warmPageHeader(per,recs){
    但仍保留「一次一关 + 让路局内」的策略，避免极端机型上叠加成可感停顿。
 
    ★★ 滚动窗口（支撑 1000+ 关）★★
-     旧版从第 0 关一路预热到最后一关。20 关时没问题，但 1000 关时：
+     旧版从第 0 关一路预热到最后一关。关卡少时没问题，但关卡很多时：
        ① 要跑 1000 × (缩略图 5~7ms + 文字位图) ≈ 8~15 秒的持续占用
        ② 更重要的是，**缩略图缓存只有 48 张（有界 LRU）**，
           预热到第 100 关时前 48 张已被驱逐 ⇒ 前面 900 多关的预热**纯属白做**
@@ -1636,7 +1546,7 @@ function preview(lv){const c=document.createElement('canvas');c.width=340;c.heig
   q.restore();return c;}
 function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);
   /* 页数按**实际列数**算（旧版写死 /3，宽屏铺 4~6 列时最后一页会算错），
-     1000 关时这个偏差会放大到十几页。 */
+     关卡很多时这个偏差会放大到十几页。 */
   const per=Math.max(1,colsPerRow());
   Game.page=Math.min(Game.page,Math.max(0,Math.ceil(Game.levels.length/per)-1));
   Game.ready=true;screenKey='';}
@@ -1644,6 +1554,6 @@ function loadLevels(){Game.levels=normalize(window.LEVELS_DATA);
 resize();loadLevels();requestAnimationFrame(frame);
 window.GameAPI={begin,pause,normalize,loadLevels,formatTime,unlocked,resetProgress,simulation,change,
   transitioning:()=>fxBusy||(window.SceneFX?SceneFX.isPlaying():false),
-  /* 调试用状态。★levels 不能用 r.lv.name★（会展开全部 1000 关）——
-     程序化关卡下名字就存在记录本身（r.name），直接用。 */
+  /* 调试用状态。★levels 不能用 r.lv.name★（会展开全部关卡）——
+     名字就存在记录本身（r.name），直接用。 */
   getState:()=>({state:Game.state,elapsed:Game.elapsed,simTime:Game.simTime,level:Game.selected,lives:Play.lives,flags:Play.flagsCollected,save:clone(Game.save),levels:Game.levels.map(r=>({name:r.name!=null?r.name:(r.lv?r.lv.name:''),key:r.key})),audio:AudioSystem.debug()})};

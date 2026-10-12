@@ -1540,8 +1540,17 @@
          并把「最快时间」与数值用**实测文字宽度**定位，避免两者粘连成一坨（旧版固定 +74 就有这个毛病）。 */
       const cx = tx + tw + 20;
       const nameY = ry + 40, dataY = ry + 78;
-      textLeft(String(i + 1).padStart(2, '0'), cx, nameY - 22, on ? C.goldHi : C.inkFaint, 1.30);
-      textLeft(r.lv.name, cx, nameY, on ? C.ink : C.inkFaint, 1.66, 1, 'rgba(5,3,14,0.70)');
+      /* ★关号 + 关卡名放同一行★
+         右侧「进入 / 未解锁」chip 占据竖直区间 ry+36..ry+86，恰好压住旧名字行（ry+40）⇒
+         旧布局只给名字留了约 150px（那是按 4 字关卡名设计的），长名（如
+         「测试关 1 · 基础与危险」）必然被截成「测试关 1 · …」或压到 chip 上。
+         移到 chip **上方**的关号行后，名字可用整张卡片的宽度 ⇒ 长名完整显示。 */
+      const numStr = String(i + 1).padStart(2, '0');
+      const numW = textW(numStr, 1.30);
+      textLeft(numStr, cx, nameY - 22, on ? C.goldHi : C.inkFaint, 1.30);
+      const nameMaxW = (rx + rw - 16) - (cx + numW + 10);
+      textLeft(fitName(r.lv.name, nameMaxW, 1.50), cx + numW + 10, nameY - 22,
+        on ? C.ink : C.inkFaint, 1.50, 1, 'rgba(5,3,14,0.70)');
       const lbW = textW('最快时间', 1.18);
       textLeft('最快时间', cx, dataY, C.inkFaint, 1.18);
       textLeft(formatTime(Game.save.best[r.key]), cx + lbW + 18, dataY,
