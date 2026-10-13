@@ -42,15 +42,20 @@ function getLabelTextPos(el){return{x:el.x+(el.w||8)/2+(el.textOffsetX||0),y:el.
 
 function getAdjacency(el,list){
   var eps=1.5;var r={up:false,down:false,left:false,right:false};
+  /* ★平台砖外形★：仅当 el 是平台时，额外记录四邻块的 `style` 原始值
+     （undefined = 该侧无邻块）⇒ 供 `_platSeamPass` 判断"异贴图接缝"。
+     ★只在 platform 上挂新键★：其他类型（门/活动块/冰/泡沫…）的 adj 结构一字不变。 */
+  var _isPlat=(el.type==='platform');
+  if(_isPlat){r.sL=undefined;r.sR=undefined;r.sU=undefined;r.sD=undefined;}
   var elW=el.w||8,elH=el.h||8;var elR=el.x+elW,elB=el.y+elH;
   for(var i=0;i<list.length;i++){
     var o=list[i];if(o===el)continue;
     if(o.type!==undefined&&el.type!==undefined&&o.type!==el.type)continue;
     var oW=o.w||8,oH=o.h||8;var oR=o.x+oW,oB=o.y+oH;
     var yOverlap=o.y<elB-0.1&&oB>el.y+0.1;
-    if(yOverlap){if(Math.abs(el.x-oR)<eps)r.left=true;if(Math.abs(o.x-elR)<eps)r.right=true;}
+    if(yOverlap){if(Math.abs(el.x-oR)<eps){r.left=true;if(_isPlat)r.sL=o.style;}if(Math.abs(o.x-elR)<eps){r.right=true;if(_isPlat)r.sR=o.style;}}
     var xOverlap=o.x<elR-0.1&&oR>el.x+0.1;
-    if(xOverlap){if(Math.abs(el.y-oB)<eps)r.up=true;if(Math.abs(o.y-elB)<eps)r.down=true;}
+    if(xOverlap){if(Math.abs(el.y-oB)<eps){r.up=true;if(_isPlat)r.sU=o.style;}if(Math.abs(o.y-elB)<eps){r.down=true;if(_isPlat)r.sD=o.style;}}
   }
   return r;
 }
@@ -3497,6 +3502,8 @@ function _bktTile(mat){
   cv.width = _BKT; cv.height = _BKT;
   var g = cv.getContext('2d');
   g.imageSmoothingEnabled = false;
+  /* ★平台砖风格贴图★：自定义绘制（`_paint` 由 `_PLAT_STYLE_MATS` 注入） */
+  if (mat._paint){ mat._paint(g, _BKT); _bktTileCache[mat.id] = cv; return cv; }
   g.fillStyle = mat.base;
   g.fillRect(0, 0, _BKT, _BKT);
   var s = mat.seed * 1.37, n = Math.round((mat.specks || 10) * 2.4);
@@ -3545,6 +3552,472 @@ function _blkFill(g, mat, x, y, w, h){
   }
   g.imageSmoothingEnabled = sm;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   ★平台砖「外形贴图」系统（20 种）★
+   ---------------------------------------------------------------------
+   用户原话：「为平台砖在编辑器属性设置里内置风格贴图，可在下拉框里直接框选；
+   平台贴在一起时的贴图融合（同贴图完全无缝、异贴图接缝处颜色渐变近似无缝）」。
+   实现口径：
+     · 每个平台元素带 `style` 字段（id 字符串，缺省 = 'default'）。
+     · 贴图仍走**世界坐标锚定**的 32px tile（`_blkFill`），⇒ 同贴图连排天然逐像素无缝。
+     · 异贴图相接：在接缝处叠一条 14px 的**连续混色**渐变带，并**裁剪到本块矩形内**
+       ⇒ 两侧各画自己那一半，两块拼起来正好是一条完整渐变，且与绘制顺序无关。
+     · 性能：渐变带只在"邻块存在且风格不同"时才创建；同风格连排零开销。
+   ★新增函数一律以 `_px*` 前缀命名，避免与既有 `_px/_pxDot` 冲突。★ */
+function _pxDisc(g,cx,cy,r,c){
+  g.fillStyle=c;
+  for(var y=-r;y<=r;y++){
+    var hw=Math.round(Math.sqrt(Math.max(0,r*r-y*y)));
+    g.fillRect(cx-hw,cy+y,hw*2+1,1);
+  }
+}
+function _pxTri(g,ax,ay,bx,by,cx,cy,color){
+  var ys=Math.min(ay,by,cy), ye=Math.max(ay,by,cy);
+  function ex(x0,y0,x1,y1,y){ if(y0===y1) return x0; return x0+(x1-x0)*(y-y0)/(y1-y0); }
+  g.fillStyle=color;
+  for(var y=Math.floor(ys);y<=Math.ceil(ye);y++){
+    var xs=[];
+    if(y>=Math.min(ay,by)&&y<=Math.max(ay,by)) xs.push(ex(ax,ay,bx,by,y));
+    if(y>=Math.min(by,cy)&&y<=Math.max(by,cy)) xs.push(ex(bx,by,cx,cy,y));
+    if(y>=Math.min(cy,ay)&&y<=Math.max(cy,ay)) xs.push(ex(cx,cy,ax,ay,y));
+    if(xs.length<2) continue;
+    var x0=Math.round(Math.min.apply(null,xs)), x1=Math.round(Math.max.apply(null,xs));
+    g.fillRect(x0,y,Math.max(1,x1-x0+1),1);
+  }
+}
+function _pxLine(g,x0,y0,x1,y1,color){
+  x0=Math.round(x0); y0=Math.round(y0); x1=Math.round(x1); y1=Math.round(y1);
+  var dx=Math.abs(x1-x0), dy=Math.abs(y1-y0), sx=x0<x1?1:-1, sy=y0<y1?1:-1, err=dx-dy;
+  g.fillStyle=color;
+  for(;;){ g.fillRect(x0,y0,1,1); if(x0===x1&&y0===y1) break;
+    var e2=2*err; if(e2>-dy){err-=dy;x0+=sx;} if(e2<dx){err+=dx;y0+=sy;} }
+}
+/* 散点颗粒（阈值 t 默认 0.62，与 `_bktTile` 的材质颗粒口径一致） */
+function _pxSpeckle(g,T,o){
+  var n=Math.round((o.n||60)), t=(o.t==null?0.62:o.t);
+  for(var i=0;i<n;i++){
+    var a=_pr(o.seed*3.1+i*7.3), b=_pr(o.seed*5.7+i*11.9), c=_pr(o.seed*9.3+i*4.1);
+    g.fillStyle=(c>t)?o.hi:o.lo;
+    g.fillRect(Math.floor(a*T),Math.floor(b*T),1,1);
+  }
+}
+/* 砖块铺排：行高 rh、行间错位半砖、1px 灰缝；可选破损/裂纹/逐砖花纹 */
+function _pxBricks(g,T,o){
+  var rh=o.rh||8, bw=o.bw||16;
+  g.fillStyle=o.mortar; g.fillRect(0,0,T,T);
+  for(var r=0;r<Math.ceil(T/rh);r++){
+    var y=r*rh, off=(r%2)?Math.floor(bw/2):0;
+    for(var x=-bw;x<T+bw;x+=bw){
+      var bx=x+off;
+      g.fillStyle=o.brick;   g.fillRect(bx+1,y+1,bw-2,rh-2);
+      g.fillStyle=o.brickHi; g.fillRect(bx+1,y+1,bw-2,1);
+      g.fillStyle=o.brickLo; g.fillRect(bx+1,y+rh-2,bw-2,1);
+      if(o.motif) o.motif(g,bx+1,y+1,bw-2,rh-2,r,bx,bw);
+    }
+  }
+  if(o.damage){
+    for(var i=0;i<o.damage;i++){
+      var a=Math.floor(_pr(o.seed+i*3.7)*T), b=Math.floor(_pr(o.seed*2.3+i*7.1)*T);
+      var w2=1+Math.floor(_pr(o.seed*5.1+i*2.9)*3), h2=1+Math.floor(_pr(o.seed*9.7+i*4.3)*2);
+      g.fillStyle=o.mortar; g.fillRect(a,b,w2,h2);
+      g.fillStyle=o.brickLo; g.fillRect(a,b,w2,1);
+    }
+  }
+  if(o.cracks){
+    for(var k=0;k<o.cracks;k++){
+      var cx=Math.floor(_pr(o.seed*11.3+k*5.5)*T), cy=Math.floor(_pr(o.seed*13.7+k*8.1)*T);
+      for(var s=0;s<4;s++){ g.fillStyle=o.crackColor||'rgba(0,0,0,0.45)'; g.fillRect(cx+((s%2)?1:0),cy+s,1,1); }
+    }
+  }
+}
+/* 面板网格（金属板倒角） */
+function _pxPanels(g,T,o){
+  var c=o.cell||16;
+  g.fillStyle=o.base; g.fillRect(0,0,T,T);
+  for(var y=0;y<T;y+=c) for(var x=0;x<T;x+=c){
+    g.fillStyle=o.seam; g.fillRect(x,y,c,1); g.fillRect(x,y,1,c);
+    g.fillStyle=o.hi;   g.fillRect(x+1,y+1,c-1,1); g.fillRect(x+1,y+1,1,c-1);
+    g.fillStyle=o.lo;   g.fillRect(x+1,y+c-1,c-1,1); g.fillRect(x+c-1,y+1,1,c-1);
+    if(o.dot){ g.fillStyle=o.dot; g.fillRect(x+2,y+2,1,1); g.fillRect(x+c-3,y+c-3,1,1); }
+  }
+}
+
+/* ── 20 种风格：{id,name,light,light2,mid,dark,dark2,paint(g,T)} ── */
+var _PLAT_STYLES = [
+  { id:'default', name:'默认', light:'#93889f', light2:'#746c8a', mid:'#5c5574', dark:'#2b2638', dark2:'#1e1a29',
+    paint:function(g,T){ g.fillStyle='#4d4760'; g.fillRect(0,0,T,T);
+      _pxSpeckle(g,T,{n:26,seed:1.37,hi:'#615a78',lo:'#3b3649'}); } },
+
+  { id:'hell', name:'地狱砖块', light:'#8a4a32', light2:'#66301f', mid:'#3d1f1a', dark:'#150808', dark2:'#0d0404',
+    paint:function(g,T){
+      _pxBricks(g,T,{rh:8,bw:16,mortar:'#1a0c0c',brick:'#3a1c18',brickHi:'#4d2519',brickLo:'#241110',
+        seed:2.1,damage:7,cracks:5,crackColor:'rgba(255,106,26,0.85)'});
+      for(var y=0;y<T;y+=8){ g.fillStyle='rgba(255,120,30,0.55)'; g.fillRect(0,y+7,T,1); }
+      for(var i=0;i<10;i++){
+        var x=Math.floor(_pr(3.7+i*5.1)*T), y2=Math.floor(_pr(7.3+i*3.9)*T);
+        g.fillStyle='#ffb347'; g.fillRect(x,y2,1,1);
+        g.fillStyle='rgba(255,90,20,0.7)'; g.fillRect(x+1,y2,1,1); g.fillRect(x,y2+1,1,1);
+      } } },
+
+  { id:'tech', name:'未来科技', light:'#8ceaff', light2:'#4fb8d8', mid:'#2b4353', dark:'#0b1319', dark2:'#060b0f',
+    paint:function(g,T){
+      _pxPanels(g,T,{cell:16,base:'#24333f',seam:'#0e161d',hi:'#3c586c',lo:'#131d26',dot:'#4fb8d8'});
+      var lines=[[2,6,13,6,13,12],[20,2,20,9,26,9],[4,22,4,29,12,29],[18,18,29,18,29,26]];
+      for(var i=0;i<lines.length;i++){
+        var p=lines[i];
+        for(var s=0;s<p.length-2;s+=2){
+          var x0=p[s],y0=p[s+1],x1=p[s+2],y1=p[s+3];
+          if(x0===x1){ for(var y=Math.min(y0,y1);y<=Math.max(y0,y1);y++) _pxDot(g,x0,y,'#3fd2e8'); }
+          else       { for(var x=Math.min(x0,x1);x<=Math.max(x0,x1);x++) _pxDot(g,x,y0,'#3fd2e8'); }
+        }
+      }
+      [[13,12],[26,9],[12,29],[29,26],[2,6],[20,2],[4,22],[18,18]].forEach(function(n){
+        _pxDot(g,n[0],n[1],'#c9f7ff'); });
+    } },
+
+  { id:'moss', name:'青苔岩石', light:'#a6b39a', light2:'#87947c', mid:'#5f6a55', dark:'#2f3529', dark2:'#1f2419',
+    paint:function(g,T){
+      g.fillStyle='#5c6355'; g.fillRect(0,0,T,T);
+      for(var i=0;i<16;i++){
+        var a=Math.floor(_pr(1.9+i*4.7)*T), b=Math.floor(_pr(3.3+i*6.1)*T);
+        var w=2+Math.floor(_pr(5.7+i*2.3)*6), h=2+Math.floor(_pr(7.1+i*3.1)*4);
+        g.fillStyle=(i%3===0)?'#6b7365':'#525a4c'; g.fillRect(a,b,w,h);
+        g.fillStyle='#3f4638'; g.fillRect(a,b+h-1,w,1); g.fillRect(a+w-1,b,1,h);
+        g.fillStyle='#7c8871'; g.fillRect(a,b,w,1);
+      }
+      _pxSpeckle(g,T,{n:30,seed:4.4,hi:'#87947c',lo:'#3f4638'});
+      for(var m=0;m<46;m++){
+        var mx=Math.floor(_pr(11.1+m*3.7)*T);
+        var my=Math.floor(Math.pow(_pr(13.7+m*5.3),1.9)*T*0.85);
+        var c=_pr(17.3+m*2.1);
+        g.fillStyle=(c>0.72)?'#8fc45e':(c>0.4?'#5f9a3e':'#3f6b2a');
+        g.fillRect(mx,my,1,1);
+        if(c>0.85) g.fillRect(mx,my+1,1,1);
+      } } },
+
+  { id:'ruin', name:'破败红砖', light:'#cf7f66', light2:'#b0604a', mid:'#8a3b2e', dark:'#4a1c14', dark2:'#2e100c',
+    paint:function(g,T){
+      _pxBricks(g,T,{rh:8,bw:16,mortar:'#6b5145',brick:'#a04836',brickHi:'#b85a44',brickLo:'#7d3527',
+        seed:5.3,damage:14,cracks:8,crackColor:'rgba(40,16,10,0.6)',
+        motif:function(g,bx,by,bw,bh){
+          if(_pr(bx*0.31+by*0.77)>0.55){ g.fillStyle='rgba(60,24,16,0.20)'; g.fillRect(bx,by,bw,bh); }
+        }});
+      for(var i=0;i<5;i++){
+        var a=Math.floor(_pr(19.3+i*6.7)*T), b=Math.floor(_pr(23.1+i*4.3)*T);
+        g.fillStyle='#2e100c'; g.fillRect(a,b,3,2);
+        g.fillStyle='#6b5145'; g.fillRect(a,b-1,3,1);
+      } } },
+
+  { id:'neon', name:'霓虹电弧', light:'#ff7ade', light2:'#b06aff', mid:'#3a2560', dark:'#0d0620', dark2:'#070312',
+    paint:function(g,T){
+      _pxPanels(g,T,{cell:16,base:'#241640',seam:'#120a26',hi:'#40295f',lo:'#150d28'});
+      var arcs=[[0,0,1,1],[32,32,-1,-1],[32,0,-1,1],[0,32,1,-1]];
+      for(var i=0;i<arcs.length;i++){
+        var a=arcs[i];
+        for(var t=0;t<=14;t++){
+          var ang=t/14*Math.PI/2;
+          var x=Math.round(a[0]+a[2]*Math.cos(ang)*14), y=Math.round(a[1]+a[3]*Math.sin(ang)*14);
+          var c=(i%2===0)?'#ff5fd2':'#4de3ff';
+          _pxDot(g,x,y,c);
+          if(t%5===0){ _pxDot(g,x,y+1,c); _pxDot(g,x+1,y,c); }
+        }
+      }
+      for(var k=0;k<7;k++){
+        var gx=Math.floor(_pr(29.1+k*5.9)*T), gy=Math.floor(_pr(31.7+k*3.3)*T);
+        _pxDot(g,gx,gy,'#ffffff'); _pxDot(g,gx+1,gy,'rgba(255,95,210,0.6)');
+      } } },
+
+    { id:'jade', name:'翡翠矿脉', light:'#c9f7dd', light2:'#93e3b7', mid:'#2f8a5e', dark:'#0a2a1b', dark2:'#05190f',
+    paint:function(g,T){
+      g.fillStyle='#1f5a33'; g.fillRect(0,0,T,T);
+      var tri=[
+        [0,0,  15,0,  7,13, '#4cb072'],
+        [15,0, 32,0,  24,14,'#3b9459'],
+        [0,13, 10,13, 4,27, '#35874f'],
+        [10,13,27,13, 19,29,'#55c07e'],
+        [27,14,32,14, 30,32,'#236841'],
+        [0,27, 18,27, 9,32, '#43a566'],
+        [18,29,32,20, 32,32,'#2f9459']
+      ];
+      for(var i=0;i<tri.length;i++){
+        var t=tri[i];
+        _pxTri(g,t[0],t[1],t[2],t[3],t[4],t[5],t[6]);
+        _pxLine(g,t[0],t[1],t[4],t[5],'rgba(201,247,221,0.55)');
+        _pxLine(g,t[4],t[5],t[2],t[3],'rgba(5,25,15,0.45)');
+      }
+      _pxSpeckle(g,T,{n:20,seed:6.9,t:0.72,hi:'#c9f7dd',lo:'#12402a'});
+      for(var k=0;k<6;k++){ _pxDot(g,Math.floor(_pr(33.1+k*4.7)*T),Math.floor(_pr(37.3+k*2.9)*T),'#eafff2'); } } },
+
+  { id:'obsidian', name:'熔岩黑曜石', light:'#ffb347', light2:'#ff7a1a', mid:'#2e2a30', dark:'#0a090c', dark2:'#050405',
+    paint:function(g,T){
+      g.fillStyle='#1c1a1e'; g.fillRect(0,0,T,T);
+      for(var i=0;i<26;i++){
+        var a=Math.floor(_pr(1.7+i*5.3)*T), b=Math.floor(_pr(3.9+i*7.7)*T);
+        var len=3+Math.floor(_pr(5.1+i*2.3)*8);
+        for(var s=0;s<len;s++){ g.fillStyle='rgba(80,76,90,0.5)'; g.fillRect(a+s,b+s,1,1); }
+      }
+      for(var k=0;k<4;k++){
+        var x=Math.floor(_pr(23.7+k*6.1)*T), y=0;
+        while(y<T){
+          var dx=(_pr(29.3+k*3.7+y*0.7)>0.5)?1:-1;
+          g.fillStyle='rgba(255,90,20,0.85)'; g.fillRect(x,y,1,1);
+          g.fillStyle='rgba(120,30,10,0.75)'; g.fillRect(x+dx,y,1,1);
+          g.fillStyle='#ffb347'; if(y%3===0) g.fillRect(x,y,1,1);
+          x+=dx; y+=1; if(x<0)x=1; if(x>=T)x=T-2;
+        }
+      }
+      _pxSpeckle(g,T,{n:20,seed:8.3,hi:'#4a4654',lo:'#000000'}); } },
+
+  { id:'gold', name:'黄金神殿', light:'#ffeeb0', light2:'#f0d178', mid:'#c9a227', dark:'#6d5310', dark2:'#4a380a',
+    paint:function(g,T){
+      _pxBricks(g,T,{rh:8,bw:16,mortar:'#6d5310',brick:'#c9a227',brickHi:'#e8c85a',brickLo:'#9c7b18',
+        seed:9.1,
+        motif:function(g,bx,by,bw,bh){
+          var cx=bx+Math.floor(bw/2), cy=by+Math.floor(bh/2);
+          _pxDot(g,cx,cy-1,'#ffeeb0'); _pxDot(g,cx-1,cy,'#ffeeb0');
+          _pxDot(g,cx+1,cy,'#ffeeb0'); _pxDot(g,cx,cy+1,'#ffeeb0');
+          _pxDot(g,cx,cy,'#8a6a10');
+        }});
+      for(var y=0;y<T;y+=8){ g.fillStyle='rgba(255,238,176,0.35)'; g.fillRect(0,y,T,1); } } },
+
+  { id:'brass', name:'机械黄铜', light:'#e8c88a', light2:'#bd9a52', mid:'#8a6a3a', dark:'#3f2f16', dark2:'#281d0d',
+    paint:function(g,T){
+      _pxPanels(g,T,{cell:16,base:'#8a6a3a',seam:'#4a3719',hi:'#c8a768',lo:'#63492a'});
+      for(var x=0;x<T;x+=4){
+        g.fillStyle='#a5834b'; g.fillRect(x,0,2,3);
+        g.fillStyle='#e8c88a'; g.fillRect(x,0,2,1);
+      }
+      for(var y=8;y<T;y+=16) for(var x2=8;x2<T;x2+=16){
+        _pxDot(g,x2,y,'#e8c88a'); _pxDot(g,x2+1,y,'#e8c88a');
+        _pxDot(g,x2,y+1,'#63492a'); _pxDot(g,x2+1,y+1,'#63492a');
+      }
+      _pxSpeckle(g,T,{n:18,seed:11.3,hi:'#bd9a52',lo:'#4a3719'}); } },
+
+  { id:'sand', name:'沙漠砂岩', light:'#f4e2ac', light2:'#e0c88a', mid:'#c9a86a', dark:'#7a5f30', dark2:'#584420',
+    paint:function(g,T){
+      _pxBricks(g,T,{rh:8,bw:16,mortar:'#8a6f3a',brick:'#c9a86a',brickHi:'#dcc084',brickLo:'#a8874a',
+        seed:1.7,damage:6,
+        motif:function(g,bx,by,bw,bh){
+          var cx=bx+Math.floor(bw/2);
+          g.fillStyle='#8a6f3a'; g.fillRect(cx,by+2,1,bh-3);
+          g.fillStyle='#7a5f30'; g.fillRect(cx-2,by+2,1,1); g.fillRect(cx+2,by+3,1,1);
+        }});
+      _pxSpeckle(g,T,{n:22,seed:2.4,hi:'#f4e2ac',lo:'#8a6f3a'}); } },
+
+  { id:'mushroom', name:'菌菇林地', light:'#e07a7a', light2:'#b04a52', mid:'#5e4a66', dark:'#241b28', dark2:'#161018',
+    paint:function(g,T){
+      g.fillStyle='#3a2c42'; g.fillRect(0,0,T,T);
+      _pxSpeckle(g,T,{n:28,seed:3.9,hi:'#4e3d58',lo:'#241b28'});
+      function cap(cx,cy,r){
+        for(var yy=-Math.round(r*0.8);yy<=0;yy++){
+          var t=yy/Math.max(1,Math.round(r*0.8));
+          var hw=Math.round(r*Math.sqrt(Math.max(0,1-t*t)));
+          g.fillStyle='#a83440'; g.fillRect(cx-hw,cy+yy,hw*2+1,1);
+          g.fillStyle='#c9505a'; g.fillRect(cx-hw,cy+yy,hw*2+1,1);
+        }
+        g.fillStyle='#ffd8d0';
+        g.fillRect(cx-Math.max(1,Math.round(r*0.5)),cy-Math.round(r*0.42),1,1);
+        g.fillRect(cx+Math.max(1,Math.round(r*0.35)),cy-Math.round(r*0.20),1,1);
+        g.fillRect(cx,cy-Math.round(r*0.62),1,1);
+      }
+      cap(8,22,7); cap(24,14,5); cap(18,30,4);
+      g.fillStyle='#6a5568'; g.fillRect(8,23,1,6); g.fillRect(24,15,1,4); g.fillRect(18,31,1,2);
+    } },
+
+  { id:'bone', name:'白骨墓穴', light:'#f4eeda', light2:'#e2d9bd', mid:'#cfc4a6', dark:'#6b6048', dark2:'#48402f',
+    paint:function(g,T){
+      _pxBricks(g,T,{rh:8,bw:16,mortar:'#7a6f56',brick:'#cfc4a6',brickHi:'#e2d9bd',brickLo:'#a89b7c',
+        seed:4.6,damage:5,
+        motif:function(g,bx,by,bw,bh){
+          var cx=bx+Math.floor(bw/2), cy=by+Math.floor(bh/2);
+          g.fillStyle='#f4eeda'; g.fillRect(cx-1,cy-1,3,2);
+          g.fillStyle='#8a7f66'; g.fillRect(cx-2,cy,1,1); g.fillRect(cx+2,cy,1,1);
+        }});
+      _pxSpeckle(g,T,{n:20,seed:5.2,hi:'#f4eeda',lo:'#8a7f66'}); } },
+
+  { id:'candy', name:'糖果乐园', light:'#fff2f8', light2:'#ffd0e4', mid:'#f2a8c8', dark:'#a04a70', dark2:'#7a3354',
+    paint:function(g,T){
+      for(var y=0;y<T;y++) for(var x=0;x<T;x++){
+        var v=(x+y)%12;
+        g.fillStyle=(v<6)?'#f289b4':((v===6)?'#ffd0e4':'#ffe6f0');
+        g.fillRect(x,y,1,1);
+      }
+      for(var i=0;i<16;i++){
+        var a=Math.floor(_pr(6.1+i*4.3)*T), b=Math.floor(_pr(8.7+i*3.1)*T);
+        g.fillStyle=(i%3===0)?'#ffffff':((i%3===1)?'#ffb0d0':'#8fd8ff');
+        g.fillRect(a,b,1,1);
+      } } },
+
+  { id:'steel', name:'工业钢板', light:'#c0cad6', light2:'#9aa6b4', mid:'#6b7480', dark:'#2c333c', dark2:'#1b2027',
+    paint:function(g,T){
+      _pxPanels(g,T,{cell:16,base:'#6b7480',seam:'#3a424c',hi:'#8792a0',lo:'#4d5560'});
+      for(var y=5;y<T;y+=16) for(var x=5;x<T;x+=16){
+        _pxDot(g,x,y,'#c0cad6'); _pxDot(g,x,y+1,'#3a424c');
+      }
+      for(var yy=T-5;yy<T-1;yy++) for(var xx=0;xx<T;xx++){
+        g.fillStyle=(((xx+yy)%8)<4)?'#e0b022':'#2a2f36';
+        g.fillRect(xx,yy,1,1);
+      } } },
+
+  { id:'bamboo', name:'竹林竹节', light:'#c8e08a', light2:'#a8cc6c', mid:'#7aa845', dark:'#3a5a20', dark2:'#264014',
+    paint:function(g,T){
+      g.fillStyle='#2f4a1c'; g.fillRect(0,0,T,T);
+      for(var c=0;c<3;c++){
+        var x=c*11+1, w=9;
+        g.fillStyle='#5c8433'; g.fillRect(x,0,w,T);
+        g.fillStyle='#7aa845'; g.fillRect(x+1,0,w-2,T);
+        g.fillStyle='#96c25e'; g.fillRect(x+1,0,2,T);
+        g.fillStyle='#3a5a20'; g.fillRect(x+w-1,0,1,T);
+        for(var y=0;y<T;y+=16){
+          g.fillStyle='#3a5a20'; g.fillRect(x,y,w,1);
+          g.fillStyle='#a8cc6c'; g.fillRect(x,y+1,w,1);
+        }
+      }
+      _pxSpeckle(g,T,{n:14,seed:7.7,hi:'#c8e08a',lo:'#2f4a1c'}); } },
+
+  { id:'honey', name:'蜂巢蜜蜡', light:'#ffe08a', light2:'#f0c060', mid:'#d99a2a', dark:'#7a5210', dark2:'#553808',
+    paint:function(g,T){
+      g.fillStyle='#8a5e14'; g.fillRect(0,0,T,T);
+      var R=5, HW=4, dx=HW*2+1, dy=Math.round(R*1.5);
+      for(var row=0;row*dy<T+dy;row++) for(var col=0;col*dx<T+dx;col++){
+        var cx=col*dx+((row%2)?Math.round(dx/2):0), cy=row*dy;
+        for(var yy=-R;yy<=R;yy++){
+          var ay=Math.abs(yy);
+          var hw=(ay<=Math.round(R*0.5))?HW
+                 :Math.max(0,Math.round(HW*(1-(ay-R*0.5)/(R-R*0.5))));
+          if(hw<1) continue;
+          g.fillStyle='#c98a20'; g.fillRect(cx-hw,cy+yy,hw*2+1,1);
+          g.fillStyle='#f0b84a'; g.fillRect(cx-hw+1,cy+yy,hw*2-1,1);
+        }
+      }
+      for(var i=0;i<12;i++)
+        _pxDot(g,Math.floor(_pr(9.1+i*3.7)*T),Math.floor(_pr(11.3+i*5.1)*T),'#ffe08a');
+    } },
+
+  { id:'book', name:'古书典籍', light:'#d8b45a', light2:'#b08a3a', mid:'#7a2a2a', dark:'#3a1010', dark2:'#240808',
+    paint:function(g,T){
+      g.fillStyle='#4a1616'; g.fillRect(0,0,T,T);
+      for(var y=0;y<T;y+=8){
+        g.fillStyle='#8a3030'; g.fillRect(0,y,T,7);
+        g.fillStyle='#9a3a34'; g.fillRect(0,y,T,1);
+        g.fillStyle='#5a1c1c'; g.fillRect(0,y+6,T,1);
+        g.fillStyle='#d8b45a'; g.fillRect(2,y+1,T-4,1);
+        g.fillStyle='#b08a3a'; g.fillRect(2,y+5,T-4,1);
+        g.fillStyle='#d8b45a'; g.fillRect(Math.floor(_pr(12.3+y*0.7)*T),y+2,1,4);
+      } } },
+
+  { id:'coral', name:'珊瑚礁', light:'#ffd0b8', light2:'#f2a890', mid:'#e07a68', dark:'#8a3a32', dark2:'#5f2822',
+    paint:function(g,T){
+      g.fillStyle='#c05a4c'; g.fillRect(0,0,T,T);
+      for(var i=0;i<18;i++){
+        var a=Math.floor(_pr(13.1+i*4.9)*T), b=Math.floor(_pr(17.7+i*3.3)*T);
+        var rr=1+Math.floor(_pr(19.3+i*2.7)*2);
+        _pxDisc(g,a,b,rr,'#7a3228');
+        _pxDisc(g,a,b,Math.max(0,rr-1),'#f2a890');
+      }
+      for(var k=0;k<7;k++){
+        var x=Math.floor(_pr(23.1+k*5.3)*T), y=Math.floor(_pr(29.7+k*3.9)*T);
+        _pxLine(g,x,y,x+1,y-4,'#ffd0b8'); _pxLine(g,x+1,y-4,x+3,y-5,'#ffd0b8');
+      }
+      _pxSpeckle(g,T,{n:16,seed:14.2,hi:'#ffd0b8',lo:'#8a3a32'}); } },
+
+  { id:'checker', name:'幻境棋盘', light:'#ffffff', light2:'#f0ecf8', mid:'#e8e4f0', dark:'#2a2438', dark2:'#181328',
+    paint:function(g,T){
+      for(var y=0;y<T;y+=8) for(var x=0;x<T;x+=8){
+        var dk=(((x/8)+(y/8))%2===0);
+        g.fillStyle=dk?'#241f30':'#e8e4f0'; g.fillRect(x,y,8,8);
+        g.fillStyle=dk?'#3a3450':'#ffffff'; g.fillRect(x,y,8,1); g.fillRect(x,y,1,8);
+      } } }
+];
+var _PLAT_STYLE_BY_ID = {};
+(function(){
+  for(var i=0;i<_PLAT_STYLES.length;i++) _PLAT_STYLE_BY_ID[_PLAT_STYLES[i].id]=_PLAT_STYLES[i];
+})();
+function _platStyleIdOf(el){
+  var s=(el&&el.style)?String(el.style):'';
+  return _PLAT_STYLE_BY_ID[s]?s:'default';
+}
+function _platStyleOf(el){ return _PLAT_STYLE_BY_ID[_platStyleIdOf(el)]; }
+
+/* ── 异贴图接缝：14px「连续混色」渐变（颜色线性插值 + 两端淡出，正中间无硬边） ── */
+var _SEAM_W = 14;
+function _seamRgb(hex){
+  return [parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)];
+}
+var _seamStopMemo = {};
+function _seamStops(grad,aHex,bHex,peak){
+  /* ★memo★：同一对颜色 + 同一 peak ⇒ 停靠点只算一次（视觉完全不变） */
+  var key=aHex+'|'+bHex+'|'+peak;
+  var list=_seamStopMemo[key];
+  if(!list){
+    var A=_seamRgb(aHex), B=_seamRgb(bHex), N=12;
+    list=[];
+    for(var i=0;i<=N;i++){
+      var t=i/N;
+      var r=Math.round(A[0]+(B[0]-A[0])*t),
+          g2=Math.round(A[1]+(B[1]-A[1])*t),
+          b2=Math.round(A[2]+(B[2]-A[2])*t);
+      var al=(Math.sin(Math.PI*t)*peak).toFixed(3);
+      list.push([t,'rgba('+r+','+g2+','+b2+','+al+')']);
+    }
+    _seamStopMemo[key]=list;
+  }
+  for(var j=0;j<list.length;j++) grad.addColorStop(list[j][0],list[j][1]);
+}
+/* 在接缝处画渐变带；★裁剪到本块矩形内★ ⇒ 两块各画一半、与绘制顺序无关 */
+function _platSeamBand(g,x,y,w,h,seam,aStyle,bStyle,vertical){
+  var half=_SEAM_W/2, grad;
+  if(vertical) grad=g.createLinearGradient(seam-half,0,seam+half,0);
+  else         grad=g.createLinearGradient(0,seam-half,0,seam+half);
+  _seamStops(grad,aStyle.mid,bStyle.mid,0.78);
+  g.save();
+  g.beginPath(); g.rect(x,y,w,h); g.clip();
+  g.fillStyle=grad;
+  if(vertical) g.fillRect(seam-half,y,_SEAM_W,h);
+  else         g.fillRect(x,seam-half,w,_SEAM_W);
+  g.restore();
+}
+function _platSeamPass(g,el,adj,st){
+  if(!adj) return;
+  var me=st.id;
+  /* ★邻块风格解析★：`adj.xxx` 为 true 表示"该侧确有同类型邻块"。
+     此时邻块的 `style` 即使是 undefined，也必须按 `default` 处理
+     —— 否则「有风格块紧挨无风格块」会漏掉接缝（曾经的真 bug）。 */
+  var nL=adj.left ?(_PLAT_STYLE_BY_ID[adj.sL]||_PLAT_STYLE_BY_ID['default']):null;
+  var nR=adj.right?(_PLAT_STYLE_BY_ID[adj.sR]||_PLAT_STYLE_BY_ID['default']):null;
+  var nU=adj.up   ?(_PLAT_STYLE_BY_ID[adj.sU]||_PLAT_STYLE_BY_ID['default']):null;
+  var nD=adj.down ?(_PLAT_STYLE_BY_ID[adj.sD]||_PLAT_STYLE_BY_ID['default']):null;
+  if(nL&&nL.id===me)nL=null;
+  if(nR&&nR.id===me)nR=null;
+  if(nU&&nU.id===me)nU=null;
+  if(nD&&nD.id===me)nD=null;
+  if(!nL&&!nR&&!nU&&!nD) return;
+  var x=Math.round(el.x), y=Math.round(el.y);
+  var w=Math.round(el.w||8), h=Math.round(el.h||8);
+  if(w<1||h<1) return;
+  if(nL) _platSeamBand(g,x,y,w,h,x,    nL,st,true);
+  if(nR) _platSeamBand(g,x,y,w,h,x+w,  st,nR,true);
+  if(nU) _platSeamBand(g,x,y,w,h,y,    nU,st,false);
+  if(nD) _platSeamBand(g,x,y,w,h,y+h,  st,nD,false);
+}
+
+/* ── 平台砖风格材质表：把 20 种风格转成 `drawBlockPixel` 可吃的材质对象 ──
+   ★`default` 直接复用原 `_BLK_MATS.platform`★ ⇒ 老关卡（无 `style` 字段）逐像素零回归。
+   其余风格：id 唯一（`plat_<id>`）⇒ tile 缓存各自独立；`_paint` 由 `_bktTile` 调用。 */
+var _PLAT_STYLE_MATS = {};
+(function(){
+  _PLAT_STYLE_MATS['default'] = _BLK_MATS.platform;
+  for(var i=0;i<_PLAT_STYLES.length;i++){
+    var s=_PLAT_STYLES[i];
+    if(s.id==='default') continue;
+    _PLAT_STYLE_MATS[s.id] = {
+      id:'plat_'+s.id, base:s.mid, sl:s.light, sd:s.dark,
+      light:s.light, light2:s.light2, mid:s.mid, dark:s.dark, dark2:s.dark2,
+      _paint:s.paint
+    };
+  }
+})();
 
 function drawBlockPixel(g, el, adj, mat){
   var x = Math.round(el.x), y = Math.round(el.y);
@@ -3608,7 +4081,11 @@ function drawBlockPixel(g, el, adj, mat){
   }
 }
 function drawPlatformTo(g, el, adj){
-  drawBlockPixel(g, el, adj, _BLK_MATS.platform);
+  /* ★外形贴图分派★：`_platStyleOf(el)` 缺省 = 'default' ⇒ `_PLAT_STYLE_MATS.default`
+     就是原 `_BLK_MATS.platform` ⇒ 无 `style` 的老关卡逐像素零回归。 */
+  var _st = _platStyleOf(el);
+  drawBlockPixel(g, el, adj, _PLAT_STYLE_MATS[_st.id] || _BLK_MATS.platform);
+  _platSeamPass(g, el, adj, _st);
 }
 function drawMovableTo(g, el, adj){
   drawBlockPixel(g, el, adj, _BLK_MATS.movable);
@@ -4768,6 +5245,13 @@ function drawBossTo(g, boss, now, cam, zoom){
      根本看不清自己在摆什么 —— 编辑器要"所见即所得"，与"正式游戏里苏醒前淡"不冲突。 */
   var vis=(cam?(boss._vis!==undefined?boss._vis:1):1);
   if(vis<0.999)g.globalAlpha*=vis;
+  /* ★BOSS 造型分派★：`inferno`（原版恶魔）⇒ 走下面原版代码一字不改，老关卡逐像素零回归；
+     其余造型 ⇒ `_drawBossVariant` 只替换"双手→胸甲→角→头→眼→嘴"这一段，
+     苏醒淡入 / 死亡淡出+碎片 / 沉睡 Z / 编辑器半径圈等公共前后段全部复用。 */
+  var _bvs=_bossStyleOf(boss);
+  if(_bvs!==_BOSS_STYLE_BY_ID['inferno']){
+    _drawBossVariant(g, boss, _bvs, now);
+  } else {
   /* ---- 双手（爪）：先画，压在肩后 ---- */
   for(var side=0;side<2;side++){
     var dir=side?-1:1;
@@ -4888,6 +5372,7 @@ function drawBossTo(g, boss, now, cam, zoom){
     g.beginPath();g.arc(mouthX+mouthW/2,mouthY+openH/2,mouthW*0.45,0,Math.PI*2);g.fill();
     g.restore();
   }
+  }  /* ← ★造型分派结束★ */
   /* 沉睡时头顶飘起的小 Z（滑稽） */
   if(!dead&&!awake){
     for(var zi=0;zi<3;zi++){
@@ -4950,6 +5435,854 @@ function drawBossTo(g, boss, now, cam, zoom){
 
 /* ★BOSS 血条★：**屏幕空间** HUD（在 renderPlay 尾部、`setTransform(dpr,...)` 恢复后调用），
    所以不受相机缩放/位移影响。只在 awake/dead 且 `_barFade>0` 时显示（滑入淡入）。 */
+/* ══════════════════════════════════════════════════════════════════════
+   ★BOSS「造型」系统（10 种）★
+   ---------------------------------------------------------------------
+   用户原话：「给游戏里的 BOSS 设计 10 种相同设计尺寸身体结构的不同配色不同外形
+   （只是替换外形，功能上应该是完全一样的，替换外形要包含完整的替换后全套动作，
+   包含睡觉、醒来、口吐弹药、死亡），要一眼能看出是不同的 boss」。
+   实现口径：
+     · BOSS 元素带 `style` 字段（id，缺省 = 'inferno' = 原版恶魔）。
+     · **包围盒、身体结构、动作与判定全部不变**：`drawBossTo` 的公共前后段
+       （苏醒淡入 / 死亡淡出+碎片 / 沉睡 Z / 编辑器半径圈）完全复用；
+       只有"双手→胸甲→角→头→眼→嘴"这一段按造型分派。
+     · ★`inferno` 走**原版代码一字不改**★ ⇒ 老关卡逐像素零回归。
+     · 造型钩子签名：horns/eyes/mouth/armor(g,B,G,P,now[,st[,mo]])，head(g,B,G,P)，
+       arms/torso(g,B,P,now)，extras(g,B,G,P,now,st)。 */
+function _bossHeadGeom(B,o){
+  o=o||{};
+  var w=B.w,h=B.h;
+  var headW=o.headW||Math.max(14,Math.round(w*0.46));
+  var headH=o.headH||Math.max(12,Math.round(h*0.36));
+  return {headX:B.x+Math.round((w-headW)/2), headY:B.y+Math.round(h*0.06), headW:headW, headH:headH};
+}
+/* 双臂 + 爪（= 原版 drawBossTo 的手臂段，参数化） */
+function _bossArms(g,B,P,now,o){
+  o=o||{};
+  var x=B.x,y=B.y,w=B.w,h=B.h;
+  var claw=o.claw||P.bone, claws=(o.claws!==undefined?o.claws:3);
+  var armC=o.armC||P.plate, palmC=o.palmC||P.body;
+  for(var side=0;side<2;side++){
+    var dir=side?-1:1;
+    var aw=Math.max(4,Math.round(w*0.13));
+    var pw=Math.max(6,Math.round(w*0.18));
+    var ph=Math.max(5,Math.round(h*0.16));
+    var armH=Math.max(8,Math.round(h*0.32));
+    var ax=dir>0?(x-Math.round(aw*0.55)):(x+w-Math.round(aw*0.45));
+    var ay=y+Math.round(h*0.46)+Math.round(Math.sin(now*1.3+side*1.7)*2);
+    _px(g,ax,ay,aw,armH,armC);
+    _px(g,ax,ay,1,armH,P.dark);
+    _px(g,ax+aw-1,ay,1,armH,P.edge);
+    var px1=dir>0?(ax-pw+Math.round(aw*0.9)):ax;
+    var py1=ay+armH-Math.round(ph*0.5);
+    _px(g,px1,py1,pw,ph,palmC);
+    _px(g,px1,py1,pw,1,P.edge);
+    _px(g,px1,py1+ph-1,pw,1,P.dark);
+    var fl=Math.max(2,Math.round(h*0.10));
+    for(var fi=0;fi<claws;fi++){
+      var fx=px1+Math.round((fi+0.5)*pw/claws);
+      for(var fk=0;fk<fl;fk++){
+        var fw2=Math.max(1,Math.round(2*(1-fk/Math.max(1,fl))+0.6));
+        _px(g,fx-Math.round(fw2/2),py1+ph-1+fk,fw2,1,claw);
+      }
+    }
+  }
+}
+/* 胸甲（桶形 + 中线 + 肩甲） */
+function _bossTorso(g,B,P,now,o){
+  o=o||{};
+  var x=B.x,y=B.y,w=B.w,h=B.h;
+  var torY=y+Math.round(h*0.38);
+  var torH=Math.max(4,h-(torY-y));
+  var torW=w;
+  for(var ty=0;ty<torH;ty++){
+    var tw2=Math.max(4,Math.round(torW*(0.80+0.20*Math.min(1,ty/Math.max(1,torH*0.5)))));
+    _px(g,x+Math.round((torW-tw2)/2),torY+ty,tw2,1,o.plate||P.plate);
+  }
+  _px(g,x+Math.round(w/2)-1,torY+2,2,Math.max(2,torH-4),P.dark);
+  _px(g,x-1,torY,Math.max(3,Math.round(w*0.10)),Math.max(3,Math.round(torH*0.22)),o.edge||P.edge);
+  _px(g,x+w-Math.max(2,Math.round(w*0.10))+1,torY,Math.max(3,Math.round(w*0.10)),Math.max(3,Math.round(torH*0.22)),o.edge||P.edge);
+}
+/* 头（梯形逐行收边） */
+function _bossHeadRows(g,B,G,P,o){
+  o=o||{};
+  for(var ry=0;ry<G.headH;ry++){
+    var rr2=Math.max(2,Math.round(G.headW*(1-Math.abs(ry/G.headH-0.35)*0.28)));
+    _px(g,G.headX+Math.round((G.headW-rr2)/2),G.headY+ry,rr2,1,ry<G.headH*0.20?(o.crown||P.edge):(o.skin||P.body));
+  }
+}
+/* 默认：羊角（4 段向斜上外弯） */
+function _bossDefHorns(g,B,G,P,now){
+  for(var hs=0;hs<2;hs++){
+    var hd=hs?-1:1;
+    var baseX=hd>0?(G.headX+Math.round(G.headW*0.10)):(G.headX+G.headW-Math.round(G.headW*0.10));
+    var baseY=G.headY+Math.round(G.headH*0.18);
+    for(var si=0;si<4;si++){
+      var t=si/3;
+      var segW=Math.max(2,Math.round(G.headW*0.14*(1-t*0.55)));
+      var segH=Math.max(2,Math.round(G.headH*0.26*(1-t*0.30)));
+      var sx=baseX+hd*Math.round(t*G.headW*0.30);
+      var sy=baseY-Math.round((si+1)*G.headH*0.24);
+      _px(g,sx-Math.round(segW/2),sy,segW,segH,si===3?P.bone:P.plate);
+    }
+  }
+}
+/* 默认：双眼（沉睡闭眼 / 死亡熄灭 / 苏醒发光） */
+function _bossDefEyes(g,B,G,P,now,st){
+  var eyeY=G.headY+Math.round(G.headH*0.40);
+  var eyeW=Math.max(2,Math.round(G.headW*0.20));
+  var eyeH=Math.max(2,Math.round(G.headH*0.16));
+  var lx=G.headX+Math.round(G.headW*0.16), rx=G.headX+Math.round(G.headW*0.62);
+  if(st==='dead'){ _px(g,lx,eyeY,eyeW,eyeH,'#2a0f14'); _px(g,rx,eyeY,eyeW,eyeH,'#2a0f14'); return; }
+  if(st==='dormant'){ _px(g,lx,eyeY+Math.round(eyeH/2),eyeW,1,'#1a060a'); _px(g,rx,eyeY+Math.round(eyeH/2),eyeW,1,'#1a060a'); return; }
+  var eg=0.75+0.25*Math.sin(now*4);
+  _px(g,lx,eyeY,eyeW,eyeH,'#2a0a10'); _px(g,rx,eyeY,eyeW,eyeH,'#2a0a10');
+  g.save(); g.globalAlpha=eg;
+  _px(g,lx+1,eyeY+1,Math.max(1,eyeW-2),Math.max(1,eyeH-2),P.eye);
+  _px(g,rx+1,eyeY+1,Math.max(1,eyeW-2),Math.max(1,eyeH-2),P.eye);
+  g.globalAlpha=eg*0.32; g.fillStyle=P.eyeCore||P.glow;
+  g.beginPath(); g.arc(lx+eyeW/2,eyeY+eyeH/2,eyeW*1.5,0,Math.PI*2); g.fill();
+  g.beginPath(); g.arc(rx+eyeW/2,eyeY+eyeH/2,eyeW*1.5,0,Math.PI*2); g.fill();
+  g.restore();
+}
+/* 默认：大嘴（尖牙 + 张口辉光） */
+function _bossDefMouth(g,B,G,P,now,st,mo){
+  var mouthW=Math.max(6,Math.round(G.headW*0.64));
+  var mouthH=Math.max(3,Math.round(G.headH*0.26));
+  var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+  var mouthY=G.headY+G.headH-Math.round(mouthH*0.90);
+  var openH=Math.max(2,Math.round(mouthH*(0.45+1.15*mo)));
+  _px(g,mouthX,mouthY,mouthW,openH,'#1a0408');
+  var tn=Math.max(3,Math.floor(mouthW/3));
+  for(var ti=0;ti<tn;ti++){
+    var tx=mouthX+Math.round((ti+0.5)*mouthW/tn);
+    if(ti%2===0)_px(g,tx,mouthY,1,Math.max(1,Math.round(openH*0.32)),P.bone);
+    else _px(g,tx,mouthY+openH-Math.max(1,Math.round(openH*0.30)),1,Math.max(1,Math.round(openH*0.30)),P.bone);
+  }
+  if(mo>0.02&&st!=='dead'){
+    g.save(); g.globalAlpha=mo*0.55; g.fillStyle=P.eyeCore||P.glow;
+    g.beginPath(); g.arc(mouthX+mouthW/2,mouthY+openH/2,mouthW*0.45,0,Math.PI*2); g.fill(); g.restore();
+  }
+}
+/* 默认：胸口魔纹 */
+function _bossDefArmor(g,B,G,P,now,st){
+  var x=B.x,y=B.y,w=B.w,h=B.h;
+  var torY=y+Math.round(h*0.38);
+  var torH=Math.max(4,h-(torY-y));
+  var runeY=torY+Math.round(torH*0.30)+Math.round(Math.sin(now*2)*1);
+  var runeGlow=st==='dead'?0.12:(0.45+0.35*(0.5+0.5*Math.sin(now*3.2)));
+  g.save(); g.globalAlpha=runeGlow;
+  _px(g,x+Math.round(w*0.28),runeY,Math.max(2,Math.round(w*0.10)),2,P.rune);
+  _px(g,x+Math.round(w*0.62),runeY,Math.max(2,Math.round(w*0.10)),2,P.rune);
+  _px(g,x+Math.round(w*0.45),runeY+3,Math.max(2,Math.round(w*0.10)),2,P.rune);
+  g.restore();
+}
+/* 手臂样式：claw 爪 / tentacle 触手 / mech 机械爪 / webbed 蹼手 / branch 树枝 / none 无 */
+function _bossArmsStyle(g,B,P,now,o){
+  o=o||{}; var style=o.style||'claw';
+  if(style==='none') return;
+  var x=B.x,y=B.y,w=B.w,h=B.h;
+  for(var side=0;side<2;side++){
+    var dir=side?-1:1;
+    var aw=Math.max(4,Math.round(w*(o.aw||0.13)));
+    var armH=Math.max(8,Math.round(h*(o.armH||0.32)));
+    var ax=dir>0?(x-Math.round(aw*0.55)):(x+w-Math.round(aw*0.45));
+    var ay=y+Math.round(h*(o.ay||0.46))+Math.round(Math.sin(now*1.3+side*1.7)*2);
+    if(style==='tentacle'){
+      var n=Math.round(h*0.40);
+      for(var s=0;s<n;s++){
+        var wob=Math.round(Math.sin(now*2.4+s*0.45+side*1.3)*2);
+        var wdt=Math.max(2,Math.round(aw*0.85*(1-s/n*0.45)));
+        _px(g,ax+(dir>0?0:aw-wdt)+wob,ay+s*1.6,wdt,2,(s%2)?P.plate:P.edge);
+      }
+      continue;
+    }
+    if(style==='branch'){
+      var nb=Math.round(h*0.34);
+      for(var s2=0;s2<nb;s2++) _px(g,ax+((s2%3===0)?1:0),ay+s2*1.5,Math.max(2,Math.round(aw*0.7)),2,P.plate);
+      _px(g,ax-2,ay+Math.round(h*0.28),6,3,P.plate);
+      _px(g,ax-3,ay+Math.round(h*0.32),4,2,P.plate);
+      _px(g,ax+aw-1,ay+Math.round(h*0.24),5,2,P.plate);
+      continue;
+    }
+    _px(g,ax,ay,aw,armH,o.armC||P.plate);
+    _px(g,ax,ay,1,armH,P.dark);
+    _px(g,ax+aw-1,ay,1,armH,P.edge);
+    var pw=Math.max(6,Math.round(w*(o.pw||0.18)));
+    var ph=Math.max(5,Math.round(h*(o.ph||0.16)));
+    var px1=dir>0?(ax-pw+Math.round(aw*0.9)):ax;
+    var py1=ay+armH-Math.round(ph*0.5);
+    _px(g,px1,py1,pw,ph,o.palmC||P.body);
+    _px(g,px1,py1,pw,1,P.edge);
+    _px(g,px1,py1+ph-1,pw,1,P.dark);
+    if(style==='mech'){
+      for(var fi=0;fi<2;fi++){
+        var fx=px1+Math.round((fi+0.5)*pw/2)-1;
+        _px(g,fx,py1+ph,3,Math.max(2,Math.round(h*0.07)),P.bone);
+      }
+      _px(g,px1+Math.round(pw/2)-1,py1+Math.round(ph/2)-1,2,2,P.glow);
+    } else if(style==='webbed'){
+      for(var f2=0;f2<3;f2++){
+        var fx2=px1+Math.round((f2+0.5)*pw/3);
+        _px(g,fx2-1,py1+ph,2,Math.max(2,Math.round(h*0.06)),P.bone);
+      }
+      _px(g,px1+1,py1+ph-1,pw-2,1,P.edge);
+    } else {
+      var fl=Math.max(2,Math.round(h*0.10));
+      for(var fi3=0;fi3<3;fi3++){
+        var fx3=px1+Math.round((fi3+0.5)*pw/3);
+        for(var fk=0;fk<fl;fk++){
+          var fw2=Math.max(1,Math.round(2*(1-fk/Math.max(1,fl))+0.6));
+          _px(g,fx3-Math.round(fw2/2),py1+ph-1+fk,fw2,1,o.claw||P.bone);
+        }
+      }
+    }
+  }
+}
+/* 躯干样式：barrel 桶形 / square 方形 / squat 宽扁 / dome 穹顶 / rock 岩块 */
+function _bossTorsoStyle(g,B,P,now,o){
+  o=o||{}; var style=o.style||'barrel';
+  var x=B.x,y=B.y,w=B.w,h=B.h;
+  var torY=y+Math.round(h*0.38);
+  var torH=Math.max(4,h-(torY-y));
+  var torW=w;
+  if(style==='square'){
+    var sw=Math.round(w*0.86), sx=x+Math.round((w-sw)/2);
+    _px(g,sx,torY,sw,torH,o.plate||P.plate);
+    _px(g,sx,torY,sw,2,o.edge||P.edge);
+    _px(g,sx,torY,2,torH,P.dark);
+    _px(g,sx+sw-2,torY,2,torH,P.dark);
+    for(var yy=torY+5;yy<torY+torH-2;yy+=6) _px(g,sx+3,yy,sw-6,1,P.dark);
+  } else if(style==='squat'){
+    for(var ty=0;ty<torH;ty++){
+      var tw2=Math.max(6,Math.round(torW*(0.98-0.12*Math.min(1,ty/Math.max(1,torH*0.4)))));
+      _px(g,x+Math.round((torW-tw2)/2),torY+ty,tw2,1,o.plate||P.plate);
+    }
+    _px(g,x+Math.round(w/2)-1,torY+2,2,Math.max(2,torH-4),P.dark);
+  } else if(style==='dome'){
+    for(var ty2=0;ty2<torH;ty2++){
+      var t=ty2/torH;
+      var tw3=Math.max(4,Math.round(torW*(0.52+0.48*Math.sqrt(Math.min(1,t*1.7)))));
+      _px(g,x+Math.round((torW-tw3)/2),torY+ty2,tw3,1,o.plate||P.plate);
+    }
+  } else if(style==='rock'){
+    for(var ty3=0;ty3<torH;ty3++){
+      var tw4=Math.max(4,Math.round(torW*(0.82+0.18*Math.min(1,ty3/Math.max(1,torH*0.5)))));
+      _px(g,x+Math.round((torW-tw4)/2),torY+ty3,tw4,1,o.plate||P.plate);
+    }
+    for(var i=0;i<16;i++){
+      var a=x+Math.round(_pr(31.1+i*4.3)*w), b=torY+Math.round(_pr(33.7+i*3.1)*torH);
+      _px(g,a,b,2,2,P.dark); _px(g,a,b,2,1,P.edge);
+    }
+  } else {
+    for(var ty4=0;ty4<torH;ty4++){
+      var tw5=Math.max(4,Math.round(torW*(0.80+0.20*Math.min(1,ty4/Math.max(1,torH*0.5)))));
+      _px(g,x+Math.round((torW-tw5)/2),torY+ty4,tw5,1,o.plate||P.plate);
+    }
+    _px(g,x+Math.round(w/2)-1,torY+2,2,Math.max(2,torH-4),P.dark);
+  }
+  if(style!=='dome'&&style!=='squat'){
+    _px(g,x-1,torY,Math.max(3,Math.round(w*0.10)),Math.max(3,Math.round(torH*0.22)),o.edge||P.edge);
+    _px(g,x+w-Math.max(2,Math.round(w*0.10))+1,torY,Math.max(3,Math.round(w*0.10)),Math.max(3,Math.round(torH*0.22)),o.edge||P.edge);
+  }
+}
+/* 造型的躯干/手臂样式（让整体轮廓也彼此不同，而不是"同一个人换帽子"） */
+function _bossStyleArms(style){ return function(g,B,P,now){ _bossArmsStyle(g,B,P,now,{style:style}); }; }
+function _bossStyleTorso(style){ return function(g,B,P,now){ _bossTorsoStyle(g,B,P,now,{style:style}); }; }
+
+/* ── 10 种造型 ── */
+var _BOSS_STYLES = [
+{ id:'inferno', name:'炽炎魔君', P:{body:'#5a1a26',plate:'#7d2534',dark:'#3a0e18',edge:'#a83a4c',bone:'#e8dcc0',
+    glow:'#ff6a4a',eye:'#ffd24a',eyeCore:'#ff8a2a',rune:'#ff6a4a',frag:['#ff6a4a','#7d2534','#3a0e18']} },
+
+{ id:'abyss', name:'深渊魔眼', P:{body:'#241a3a',plate:'#3a2a5c',dark:'#150e26',edge:'#6a4a9a',bone:'#c8b8e0',
+    glow:'#7affd0',eye:'#7affd0',eyeCore:'#3affb0',rune:'#7affd0',frag:['#7affd0','#3a2a5c','#150e26']},
+  torso:_bossStyleTorso('dome'), arms:_bossStyleArms('tentacle'),
+  horns:function(g,B,G,P,now){
+    for(var i=0;i<4;i++){
+      var t=(i<2)?-1:1, k=(i%2);
+      var bx=G.headX+G.headW*(t<0?0.18:0.82), by=G.headY+G.headH*0.10;
+      for(var s=0;s<9;s++){
+        var wob=Math.round(Math.sin(now*2.2+s*0.6+i)*2);
+        _px(g,bx+t*(s*0.9)+wob,by+s*2.4,2,2,(s%3===0)?P.edge:P.plate);
+      }
+      _pxDot(g,bx+t*8+Math.round(Math.sin(now*2.2+9*0.6+i)*2),by+22,P.glow);
+    }
+  },
+  head:function(g,B,G,P){
+    for(var ry=0;ry<G.headH;ry++){
+      var t=ry/G.headH;
+      var rr=Math.max(2,Math.round(G.headW*Math.sqrt(Math.max(0.05,1-Math.pow((t-0.5)*2,2)))));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,t<0.18?P.edge:P.body);
+    }
+  },
+  eyes:function(g,B,G,P,now,st){
+    var cx=G.headX+Math.round(G.headW*0.5), cy=G.headY+Math.round(G.headH*0.42);
+    var ew=Math.max(6,Math.round(G.headW*0.42)), eh=Math.max(4,Math.round(G.headH*0.26));
+    if(st==='dormant'){ _px(g,cx-Math.round(ew/2),cy,ew,1,'#0d0718'); return; }
+    var dead=(st==='dead');
+    _pxDisc(g,cx,cy,Math.round(eh/2)+1,dead?'#120a1c':'#0a0612');
+    for(var i=0;i<eh;i++){
+      var t=i/Math.max(1,eh-1), hw=Math.round(ew/2*Math.sqrt(Math.max(0,1-Math.pow((t-0.5)*2,2))));
+      _px(g,cx-hw,cy-Math.round(eh/2)+i,hw*2+1,1,dead?'#1e3a34':P.eye);
+    }
+    if(!dead){
+      _pxDisc(g,cx,cy,Math.max(1,Math.round(eh*0.30)),'#0a1a18');
+      g.save(); g.globalAlpha=0.55+0.35*Math.sin(now*3.1); g.fillStyle=P.eyeCore;
+      g.beginPath(); g.arc(cx,cy,ew*0.55,0,Math.PI*2); g.fill(); g.restore();
+    }
+    for(var k=0;k<3;k++){
+      var ax=cx+(k-1)*Math.round(G.headW*0.30), ay=G.headY+Math.round(G.headH*0.16);
+      _pxDot(g,ax,ay,dead?'#1a3030':P.glow);
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var cx=G.headX+Math.round(G.headW*0.5);
+    var mouthY=G.headY+G.headH-Math.round(G.headH*0.10);
+    var openH=Math.max(2,Math.round(G.headH*(0.16+0.30*mo)));
+    for(var i=0;i<openH;i++){
+      var hw=Math.max(1,Math.round(G.headW*0.16*(1-i/Math.max(1,openH))));
+      _px(g,cx-hw,mouthY+i,hw*2+1,1,'#0a0410');
+    }
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.5; g.fillStyle=P.eyeCore;
+      g.beginPath(); g.arc(cx,mouthY+openH/2,6,0,Math.PI*2); g.fill(); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    g.save(); g.globalAlpha=st==='dead'?0.15:(0.40+0.25*Math.sin(now*2.4));
+    for(var i=0;i<5;i++) _pxDot(g,x+Math.round(w*(0.22+i*0.14)),torY+Math.round(torH*0.55)+((i%2)?2:0),P.glow);
+    g.restore();
+  } },
+
+{ id:'thunder', name:'雷霆领主', P:{body:'#2a2a4a',plate:'#46466e',dark:'#141428',edge:'#8a8aff',bone:'#e8f0ff',
+    glow:'#a0f0ff',eye:'#ffffff',eyeCore:'#a0f0ff',rune:'#a0f0ff',frag:['#a0f0ff','#46466e','#141428']},
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var baseX=hd>0?(G.headX+Math.round(G.headW*0.16)):(G.headX+G.headW-Math.round(G.headW*0.16));
+      var baseY=G.headY+Math.round(G.headH*0.20);
+      for(var s=0;s<7;s++){
+        var wdt=Math.max(1,Math.round(3-s*0.30));
+        _px(g,baseX+hd*Math.round(s*1.5)-Math.round(wdt/2),baseY-s*Math.round(G.headH*0.14),wdt,Math.max(1,Math.round(G.headH*0.14)+1),s>4?P.bone:P.plate);
+      }
+      _pxDot(g,baseX+hd*11,baseY-Math.round(G.headH*0.98),P.glow);
+    }
+    g.save(); g.globalAlpha=0.45+0.45*Math.sin(now*7);
+    for(var k=0;k<2;k++){
+      var a=G.headX+Math.round(G.headW*(0.30+k*0.40)), b=G.headY-Math.round(G.headH*0.30);
+      _pxLine(g,a,b,a+2,b-4,P.glow); _pxLine(g,a+2,b-4,a-1,b-8,P.glow); _pxLine(g,a-1,b-8,a+3,b-11,P.glow);
+    }
+    g.restore();
+  },
+  eyes:function(g,B,G,P,now,st){
+    var eyeY=G.headY+Math.round(G.headH*0.40);
+    var eyeW=Math.max(2,Math.round(G.headW*0.22)), eyeH=Math.max(2,Math.round(G.headH*0.13));
+    var lx=G.headX+Math.round(G.headW*0.13), rx=G.headX+Math.round(G.headW*0.63);
+    if(st==='dormant'){ _px(g,lx,eyeY+Math.round(eyeH/2),eyeW,1,'#0c0c20'); _px(g,rx,eyeY+Math.round(eyeH/2),eyeW,1,'#0c0c20'); return; }
+    var dead=(st==='dead');
+    _px(g,lx-1,eyeY-1,eyeW+2,eyeH+2,'#0e0e22'); _px(g,rx-1,eyeY-1,eyeW+2,eyeH+2,'#0e0e22');
+    _px(g,lx,eyeY,eyeW,eyeH,dead?'#3a3a60':P.eye); _px(g,rx,eyeY,eyeW,eyeH,dead?'#3a3a60':P.eye);
+    if(!dead){
+      g.save(); g.globalAlpha=0.35+0.35*Math.sin(now*4);
+      _px(g,lx-2,eyeY-2,eyeW+4,1,P.glow); _px(g,rx-2,eyeY-2,eyeW+4,1,P.glow);
+      g.restore();
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(6,Math.round(G.headW*0.66));
+    var mouthH=Math.max(3,Math.round(G.headH*0.22));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(mouthH*0.85);
+    var openH=Math.max(2,Math.round(mouthH*(0.4+1.2*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#08081a');
+    for(var ti=0;ti<Math.floor(mouthW/3);ti++){
+      var tx=mouthX+Math.round((ti+0.5)*mouthW/Math.floor(mouthW/3));
+      _px(g,tx,mouthY,1,Math.max(1,Math.round(openH*0.40)),P.bone);
+    }
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.6; g.fillStyle=P.glow;
+      g.beginPath(); g.arc(mouthX+mouthW/2,mouthY+openH/2,mouthW*0.42,0,Math.PI*2); g.fill(); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    g.save(); g.globalAlpha=st==='dead'?0.12:(0.35+0.35*Math.abs(Math.sin(now*3)));
+    _px(g,x+Math.round(w*0.30),torY+Math.round(torH*0.32),Math.max(2,Math.round(w*0.14)),1,P.glow);
+    _pxLine(g,x+Math.round(w*0.37),torY+Math.round(torH*0.32),x+Math.round(w*0.55),torY+Math.round(torH*0.70),P.glow);
+    _px(g,x+Math.round(w*0.56),torY+Math.round(torH*0.70),Math.max(2,Math.round(w*0.14)),1,P.glow);
+    g.restore();
+  } },
+
+{ id:'steel', name:'机械暴君', P:{body:'#4a5058',plate:'#6b7480',dark:'#262b31',edge:'#9aa6b4',bone:'#d8dee6',
+    glow:'#40e0d0',eye:'#ff4040',eyeCore:'#ff8080',rune:'#40e0d0',frag:['#40e0d0','#6b7480','#262b31']},
+  torso:_bossStyleTorso('square'), arms:_bossStyleArms('mech'),
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var bx=hd>0?(G.headX+Math.round(G.headW*0.22)):(G.headX+G.headW-Math.round(G.headW*0.22));
+      var by=G.headY;
+      for(var s=0;s<6;s++) _px(g,bx,by-s*3,1,3,P.plate);
+      _px(g,bx-1,by-19,3,2,'#2a2f36');
+      g.save(); g.globalAlpha=0.4+0.5*Math.abs(Math.sin(now*3+hs));
+      _pxDot(g,bx,by-20,hs?P.glow:P.eye); g.restore();
+    }
+  },
+  head:function(g,B,G,P){
+    _px(g,G.headX,G.headY,G.headW,G.headH,P.body);
+    _px(g,G.headX,G.headY,G.headW,Math.max(2,Math.round(G.headH*0.14)),P.edge);
+    _px(g,G.headX,G.headY,2,G.headH,P.plate);
+    _px(g,G.headX+G.headW-2,G.headY,2,G.headH,P.dark);
+    _pxDot(g,G.headX+3,G.headY+G.headH-3,P.bone);
+    _pxDot(g,G.headX+G.headW-4,G.headY+G.headH-3,P.bone);
+    _px(g,G.headX,G.headY,2,2,P.dark); _px(g,G.headX+G.headW-2,G.headY,2,2,P.dark);
+  },
+  eyes:function(g,B,G,P,now,st){
+    var cx=G.headX+Math.round(G.headW*0.5);
+    var eyeY=G.headY+Math.round(G.headH*0.42);
+    var eyeW=Math.round(G.headW*0.72), eyeH=Math.max(3,Math.round(G.headH*0.20));
+    var ex=cx-Math.round(eyeW/2);
+    _px(g,ex-1,eyeY-1,eyeW+2,eyeH+2,'#14181d');
+    if(st==='dormant'){ _px(g,ex,eyeY+Math.round(eyeH/2),eyeW,1,'#2a1010'); return; }
+    var dead=(st==='dead');
+    _px(g,ex,eyeY,eyeW,eyeH,dead?'#3a1818':'#4a0e0e');
+    if(!dead){
+      var sweep=Math.round((0.5+0.5*Math.sin(now*2.2))*(eyeW-4));
+      g.save(); g.globalAlpha=0.9;
+      _px(g,ex+2+sweep,eyeY+1,3,Math.max(1,eyeH-2),P.eye);
+      g.globalAlpha=0.35; g.fillStyle=P.eye;
+      g.fillRect(ex,eyeY+Math.round(eyeH/2),eyeW,1);
+      g.restore();
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(6,Math.round(G.headW*0.62));
+    var mouthH=Math.max(3,Math.round(G.headH*0.20));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(mouthH*0.90);
+    var openH=Math.max(2,Math.round(mouthH*(0.5+0.9*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#0c1014');
+    for(var x=mouthX+2;x<mouthX+mouthW-1;x+=3) _px(g,x,mouthY+1,1,Math.max(1,openH-2),P.plate);
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.5; g.fillStyle=P.glow;
+      g.fillRect(mouthX,mouthY+Math.round(openH/2)-1,mouthW,2); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    var cx=x+Math.round(w*0.5), cy=torY+Math.round(torH*0.42);
+    _pxDisc(g,cx,cy,Math.max(3,Math.round(w*0.075)),P.dark);
+    g.save(); g.globalAlpha=st==='dead'?0.15:(0.55+0.40*Math.sin(now*3.4));
+    _pxDisc(g,cx,cy,Math.max(2,Math.round(w*0.050)),P.glow); g.restore();
+    for(var i=0;i<4;i++){ _pxDot(g,x+Math.round(w*(0.20+i*0.20)),torY+3,P.bone); }
+  } },
+
+{ id:'venom', name:'剧毒蟾王', P:{body:'#4a6a20',plate:'#6a8f2e',dark:'#2a3d10',edge:'#9ac040',bone:'#e8f0c0',
+    glow:'#d0ff40',eye:'#ffd24a',eyeCore:'#d0ff40',rune:'#d0ff40',frag:['#d0ff40','#6a8f2e','#2a3d10']},
+  torso:_bossStyleTorso('squat'), arms:_bossStyleArms('webbed'),
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var bx=G.headX+Math.round(G.headW*(hd>0?0.24:0.76));
+      var by=G.headY-Math.round(G.headH*0.06);
+      _pxDisc(g,bx,by,Math.max(4,Math.round(G.headW*0.16)),P.plate);
+      _pxDisc(g,bx,by-1,Math.max(3,Math.round(G.headW*0.13)),P.body);
+    }
+  },
+  head:function(g,B,G,P,o){
+    for(var ry=0;ry<G.headH;ry++){
+      var t=ry/G.headH;
+      var rr=Math.max(4,Math.round(G.headW*(0.72+0.28*Math.min(1,t*2.4))));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,ry<G.headH*0.16?P.edge:P.body);
+    }
+    for(var i=0;i<9;i++){
+      var a=G.headX+Math.round(_pr(3.3+i*4.7)*G.headW), b=G.headY+Math.round(_pr(5.1+i*3.1)*G.headH);
+      _pxDot(g,a,b,P.dark); _pxDot(g,a,b-1,P.edge);
+    }
+  },
+  eyes:function(g,B,G,P,now,st){
+    var cy=G.headY-Math.round(G.headH*0.06);
+    var ew=Math.max(5,Math.round(G.headW*0.26)), eh=Math.max(4,Math.round(G.headH*0.24));
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var cx=G.headX+Math.round(G.headW*(hd>0?0.24:0.76));
+      if(st==='dormant'){ _px(g,cx-Math.round(ew/2),cy,ew,1,'#16240a'); continue; }
+      var dead=(st==='dead');
+      _px(g,cx-Math.round(ew/2),cy-Math.round(eh/2),ew,eh,dead?'#2a3418':'#0d1606');
+      _px(g,cx-Math.round(ew/2)+1,cy-Math.round(eh/2)+1,Math.max(1,ew-2),Math.max(1,eh-2),dead?'#4a5a2a':P.eye);
+      if(!dead) _px(g,cx-1,cy,2,Math.max(2,Math.round(eh*0.6)),'#1a1206');
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(8,Math.round(G.headW*0.94));
+    var mouthH=Math.max(3,Math.round(G.headH*0.20));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(mouthH*0.80);
+    var openH=Math.max(2,Math.round(mouthH*(0.45+1.1*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#101a04');
+    var tn=Math.max(4,Math.floor(mouthW/4));
+    for(var ti=0;ti<tn;ti++){
+      var tx=mouthX+Math.round((ti+0.5)*mouthW/tn);
+      if(ti%2===0)_px(g,tx,mouthY,1,Math.max(1,Math.round(openH*0.30)),P.bone);
+      else _px(g,tx,mouthY+openH-Math.max(1,Math.round(openH*0.28)),1,Math.max(1,Math.round(openH*0.28)),P.bone);
+    }
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.5; g.fillStyle=P.eyeCore;
+      g.beginPath(); g.arc(mouthX+mouthW/2,mouthY+openH/2,mouthW*0.4,0,Math.PI*2); g.fill(); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    for(var i=0;i<10;i++){
+      var a=x+Math.round(_pr(9.1+i*3.7)*w), b=torY+Math.round(_pr(11.3+i*5.3)*torH);
+      _pxDot(g,a,b,P.dark); _pxDot(g,a,b-1,P.edge);
+    }
+  } },
+
+{ id:'pharaoh', name:'骷髅法老', P:{body:'#cfc4a6',plate:'#e2d9bd',dark:'#6b6048',edge:'#c9a227',bone:'#f4eeda',
+    glow:'#40c0e0',eye:'#40c0e0',eyeCore:'#a0f0ff',rune:'#c9a227',frag:['#40c0e0','#e2d9bd','#6b6048']},
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var bx=hd>0?(G.headX-Math.round(G.headW*0.10)):(G.headX+G.headW-Math.round(G.headW*0.02));
+      var bw=Math.max(4,Math.round(G.headW*0.14));
+      for(var y=0;y<Math.round(G.headH*1.35);y++){
+        var x0=bx+hd*Math.round(y*0.10);
+        _px(g,x0,y+G.headY-Math.round(G.headH*0.12),bw,1,(Math.floor(y/3)%2)?'#1a3a7a':'#c9a227');
+      }
+    }
+    _px(g,G.headX-Math.round(G.headW*0.10),G.headY-Math.round(G.headH*0.16),Math.round(G.headW*1.20),3,'#c9a227');
+  },
+  head:function(g,B,G,P){
+    for(var ry=0;ry<G.headH;ry++){
+      var t=ry/G.headH;
+      var rr=Math.max(4,Math.round(G.headW*(0.66+0.24*Math.min(1,t*2))));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,ry<G.headH*0.14?P.bone:P.plate);
+    }
+    _px(g,G.headX+Math.round(G.headW*0.10),G.headY+Math.round(G.headH*0.70),Math.round(G.headW*0.18),2,P.dark);
+    _px(g,G.headX+Math.round(G.headW*0.72),G.headY+Math.round(G.headH*0.70),Math.round(G.headW*0.18),2,P.dark);
+  },
+  eyes:function(g,B,G,P,now,st){
+    var eyeY=G.headY+Math.round(G.headH*0.32);
+    var ew=Math.max(3,Math.round(G.headW*0.24)), eh=Math.max(3,Math.round(G.headH*0.24));
+    var lx=G.headX+Math.round(G.headW*0.14), rx=G.headX+Math.round(G.headW*0.62);
+    var dead=(st==='dead');
+    _px(g,lx,eyeY,ew,eh,'#1a1610'); _px(g,rx,eyeY,ew,eh,'#1a1610');
+    if(st==='dormant') return;
+    g.save(); g.globalAlpha=dead?0.25:(0.7+0.3*Math.sin(now*3.6));
+    _px(g,lx+1,eyeY+1,Math.max(1,ew-2),Math.max(1,eh-2),P.eye);
+    _px(g,rx+1,eyeY+1,Math.max(1,ew-2),Math.max(1,eh-2),P.eye);
+    g.globalAlpha=dead?0.1:0.28; g.fillStyle=P.eyeCore;
+    g.beginPath(); g.arc(lx+ew/2,eyeY+eh/2,ew*1.1,0,Math.PI*2); g.fill();
+    g.beginPath(); g.arc(rx+ew/2,eyeY+eh/2,ew*1.1,0,Math.PI*2); g.fill();
+    g.restore();
+    _px(g,G.headX+Math.round(G.headW*0.44),G.headY+Math.round(G.headH*0.56),Math.max(2,Math.round(G.headW*0.12)),Math.max(2,Math.round(G.headH*0.16)),'#1a1610');
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(6,Math.round(G.headW*0.78));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(G.headH*0.24);
+    var openH=Math.max(3,Math.round(G.headH*(0.10+0.16*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#1a1610');
+    for(var x=mouthX+1;x<mouthX+mouthW-1;x+=2) _px(g,x,mouthY,1,openH,P.bone);
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    _px(g,x+Math.round(w*0.16),torY+2,Math.round(w*0.68),2,'#c9a227');
+    _px(g,x+Math.round(w*0.16),torY+Math.round(torH*0.62),Math.round(w*0.68),2,'#c9a227');
+    var cx=x+Math.round(w*0.5), cy=torY+Math.round(torH*0.40);
+    g.save(); g.globalAlpha=st==='dead'?0.2:(0.6+0.35*Math.sin(now*2.6));
+    _pxDisc(g,cx,cy,Math.max(2,Math.round(w*0.055)),P.eye); g.restore();
+  } },
+
+{ id:'magma', name:'熔岩巨兽', P:{body:'#241a18',plate:'#3a2a26',dark:'#120c0a',edge:'#ff7a1a',bone:'#ffe0b0',
+    glow:'#ffb347',eye:'#ffdd66',eyeCore:'#ff7a1a',rune:'#ff7a1a',frag:['#ffb347','#3a2a26','#120c0a']},
+  torso:_bossStyleTorso('rock'),
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var bx=hd>0?(G.headX+Math.round(G.headW*0.14)):(G.headX+G.headW-Math.round(G.headW*0.14));
+      var by=G.headY+Math.round(G.headH*0.16);
+      for(var s=0;s<5;s++){
+        var wdt=Math.max(2,Math.round(G.headW*0.16*(1-s*0.13)));
+        var sx=bx+hd*Math.round(s*G.headW*0.05), sy=by-Math.round((s+1)*G.headH*0.19);
+        _px(g,sx-Math.round(wdt/2),sy,wdt,Math.max(2,Math.round(G.headH*0.20)),P.plate);
+        if(s%2===0){ g.save(); g.globalAlpha=0.6+0.4*Math.sin(now*3+s); _px(g,sx-1,sy+1,2,2,P.glow); g.restore(); }
+      }
+    }
+  },
+  eyes:function(g,B,G,P,now,st){
+    var eyeY=G.headY+Math.round(G.headH*0.40);
+    var ew=Math.max(3,Math.round(G.headW*0.22)), eh=Math.max(3,Math.round(G.headH*0.18));
+    var lx=G.headX+Math.round(G.headW*0.15), rx=G.headX+Math.round(G.headW*0.61);
+    if(st==='dormant'){ _px(g,lx,eyeY+Math.round(eh/2),ew,1,'#2a1408'); _px(g,rx,eyeY+Math.round(eh/2),ew,1,'#2a1408'); return; }
+    var dead=(st==='dead');
+    _px(g,lx-1,eyeY-1,ew+2,eh+2,'#0a0605'); _px(g,rx-1,eyeY-1,ew+2,eh+2,'#0a0605');
+    _px(g,lx,eyeY,ew,eh,dead?'#5a3a1a':P.eye); _px(g,rx,eyeY,ew,eh,dead?'#5a3a1a':P.eye);
+    if(!dead){
+      g.save(); g.globalAlpha=0.35+0.3*Math.sin(now*4.2); g.fillStyle=P.eyeCore;
+      g.beginPath(); g.arc(lx+ew/2,eyeY+eh/2,ew*1.2,0,Math.PI*2); g.fill();
+      g.beginPath(); g.arc(rx+ew/2,eyeY+eh/2,ew*1.2,0,Math.PI*2); g.fill(); g.restore();
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(6,Math.round(G.headW*0.70));
+    var mouthH=Math.max(3,Math.round(G.headH*0.28));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(mouthH*0.90);
+    var openH=Math.max(2,Math.round(mouthH*(0.45+1.1*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#180604');
+    var tn=Math.max(3,Math.floor(mouthW/4));
+    for(var ti=0;ti<tn;ti++){
+      var tx=mouthX+Math.round((ti+0.5)*mouthW/tn);
+      if(ti%2===0)_px(g,tx,mouthY,2,Math.max(2,Math.round(openH*0.45)),P.bone);
+      else _px(g,tx,mouthY+openH-Math.max(2,Math.round(openH*0.40)),2,Math.max(2,Math.round(openH*0.40)),P.bone);
+    }
+    if(st!=='dead'){
+      g.save(); g.globalAlpha=0.30+0.25*mo; g.fillStyle=P.eyeCore;
+      g.beginPath(); g.arc(mouthX+mouthW/2,mouthY+openH/2,mouthW*0.42,0,Math.PI*2); g.fill(); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    g.save(); g.globalAlpha=st==='dead'?0.20:(0.55+0.35*Math.sin(now*2.8));
+    for(var k=0;k<4;k++){
+      var sx=x+Math.round(w*(0.22+k*0.19)), sy=torY+2;
+      for(var s=0;s<Math.round(torH*0.8);s++) _pxDot(g,sx+((s%2)?1:0),sy+s,P.glow);
+    }
+    g.restore();
+  } },
+
+{ id:'dream', name:'幻梦水母', P:{body:'#7a4a9a',plate:'#a06ac0',dark:'#3a2050',edge:'#ff9ae0',bone:'#ffe0f8',
+    glow:'#ffe0f8',eye:'#ffffff',eyeCore:'#ff9ae0',rune:'#ff9ae0',frag:['#ff9ae0','#a06ac0','#3a2050']},
+  torso:_bossStyleTorso('dome'), arms:_bossStyleArms('none'),
+  horns:function(g,B,G,P,now){
+    for(var i=0;i<3;i++){
+      var bx=G.headX+Math.round(G.headW*(0.28+i*0.22));
+      for(var s=0;s<5;s++){
+        var wob=Math.round(Math.sin(now*2.6+s*0.7+i)*1.6);
+        _pxDot(g,bx+wob,G.headY-s*2-2,P.edge);
+      }
+    }
+  },
+  head:function(g,B,G,P){
+    for(var ry=0;ry<G.headH;ry++){
+      var t=ry/G.headH;
+      var rr=Math.max(3,Math.round(G.headW*Math.sqrt(Math.max(0.04,1-Math.pow(t,1.7)))));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,ry<G.headH*0.16?P.edge:P.plate);
+    }
+    g.save(); g.globalAlpha=0.35;
+    for(var k=0;k<2;k++){
+      var hx=G.headX+Math.round(G.headW*(0.22+k*0.30));
+      _px(g,hx,G.headY+Math.round(G.headH*0.30),2,Math.round(G.headH*0.34),'#ffffff');
+    }
+    g.restore();
+  },
+  eyes:function(g,B,G,P,now,st){
+    var eyeY=G.headY+Math.round(G.headH*0.52);
+    var ew=Math.max(3,Math.round(G.headW*0.16));
+    var lx=G.headX+Math.round(G.headW*0.24), rx=G.headX+Math.round(G.headW*0.60);
+    if(st==='dormant'){ _px(g,lx,eyeY,ew,1,'#2a1640'); _px(g,rx,eyeY,ew,1,'#2a1640'); return; }
+    var dead=(st==='dead');
+    var c=dead?'#6a5a80':'#ffffff';
+    _px(g,lx,eyeY+2,ew,1,c); _px(g,lx+1,eyeY+1,ew-2,1,c);
+    _px(g,rx,eyeY+2,ew,1,c); _px(g,rx+1,eyeY+1,ew-2,1,c);
+    if(!dead){
+      g.save(); g.globalAlpha=0.30+0.25*Math.sin(now*3);
+      _px(g,lx,eyeY+3,ew,1,P.eyeCore); _px(g,rx,eyeY+3,ew,1,P.eyeCore); g.restore();
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var cx=G.headX+Math.round(G.headW*0.5);
+    var mouthY=G.headY+Math.round(G.headH*0.80);
+    var r=Math.max(2,Math.round(G.headW*(0.07+0.05*mo)));
+    _pxDisc(g,cx,mouthY,r,'#2a1240');
+    if(st!=='dead'&&mo>0.02){
+      g.save(); g.globalAlpha=mo*0.55; _pxDisc(g,cx,mouthY,Math.max(1,r-1),P.eyeCore); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    g.save(); g.globalAlpha=st==='dead'?0.25:0.85;
+    for(var i=0;i<5;i++){
+      var bx=x+Math.round(w*(0.20+i*0.15));
+      for(var s=0;s<Math.round(h*0.22);s++){
+        var wob=Math.round(Math.sin(now*2.2+s*0.5+i*1.1)*2);
+        _pxDot(g,bx+wob,y+h+s,P.edge);
+        if(s%2===0) _pxDot(g,bx+wob,y+h+s+1,P.plate);
+      }
+    }
+    g.restore();
+  } },
+
+{ id:'thorn', name:'荆棘树妖', P:{body:'#5a4020',plate:'#7a5a30',dark:'#2e2010',edge:'#a08050',bone:'#d8c090',
+    glow:'#8fd040',eye:'#d0ff60',eyeCore:'#8fd040',rune:'#8fd040',frag:['#8fd040','#7a5a30','#2e2010']},
+  torso:_bossStyleTorso('rock'), arms:_bossStyleArms('branch'),
+  horns:function(g,B,G,P,now){
+    for(var hs=0;hs<2;hs++){
+      var hd=hs?-1:1;
+      var bx=hd>0?(G.headX+Math.round(G.headW*0.16)):(G.headX+G.headW-Math.round(G.headW*0.16));
+      var by=G.headY+Math.round(G.headH*0.18);
+      for(var s=0;s<4;s++) _px(g,bx+hd*Math.round(s*1.6)-1,by-s*Math.round(G.headH*0.20),3,Math.round(G.headH*0.20)+1,P.plate);
+      _px(g,bx+hd*4-1,by-Math.round(G.headH*0.56),2,Math.round(G.headH*0.24),P.plate);
+      _px(g,bx+hd*10-1,by-Math.round(G.headH*0.70),2,Math.round(G.headH*0.22),P.plate);
+      g.save(); g.globalAlpha=0.9;
+      _pxDot(g,bx+hd*4-2,by-Math.round(G.headH*0.60),P.glow);
+      _pxDot(g,bx+hd*4,by-Math.round(G.headH*0.62),P.glow);
+      _pxDot(g,bx+hd*10-2,by-Math.round(G.headH*0.74),P.glow);
+      g.restore();
+    }
+  },
+  head:function(g,B,G,P){
+    for(var ry=0;ry<G.headH;ry++){
+      var rr=Math.max(4,Math.round(G.headW*(1-Math.abs(ry/G.headH-0.35)*0.22)));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,ry<G.headH*0.16?P.edge:P.body);
+    }
+    for(var k=0;k<4;k++) _px(g,G.headX+Math.round(G.headW*(0.24+k*0.18)),G.headY+Math.round(G.headH*0.20),1,Math.round(G.headH*0.42),P.dark);
+  },
+  eyes:function(g,B,G,P,now,st){
+    var eyeY=G.headY+Math.round(G.headH*0.38);
+    var ew=Math.max(3,Math.round(G.headW*0.20)), eh=Math.max(3,Math.round(G.headH*0.20));
+    var lx=G.headX+Math.round(G.headW*0.16), rx=G.headX+Math.round(G.headW*0.62);
+    _px(g,lx-1,eyeY-1,ew+2,eh+2,P.dark); _px(g,rx-1,eyeY-1,ew+2,eh+2,P.dark);
+    if(st==='dormant') return;
+    var dead=(st==='dead');
+    g.save(); g.globalAlpha=dead?0.25:(0.7+0.3*Math.sin(now*3.2));
+    _px(g,lx,eyeY,ew,eh,P.eye); _px(g,rx,eyeY,ew,eh,P.eye);
+    g.restore();
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(5,Math.round(G.headW*0.52));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(G.headH*0.22);
+    var openH=Math.max(2,Math.round(G.headH*(0.08+0.16*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,P.dark);
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.5; _px(g,mouthX+1,mouthY+1,mouthW-2,Math.max(1,openH-2),P.eyeCore); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    var cx=x+Math.round(w*0.5), cy=torY+Math.round(torH*0.45);
+    for(var r=Math.round(w*0.16);r>2;r-=3){
+      g.save(); g.globalAlpha=0.55; _pxDisc(g,cx,cy,r,P.dark);
+      _pxDisc(g,cx,cy,Math.max(1,r-1),P.plate); g.restore();
+    }
+    for(var i=0;i<8;i++){
+      var a=x+Math.round(_pr(21.1+i*3.3)*w), b=torY+Math.round(_pr(23.7+i*4.1)*torH);
+      _pxDot(g,a,b,P.glow);
+    }
+  } },
+
+{ id:'void', name:'虚空之主', P:{body:'#1a0e2a',plate:'#2e1a48',dark:'#0a0514',edge:'#c030a0',bone:'#e0a0e8',
+    glow:'#ff40c0',eye:'#ff40c0',eyeCore:'#ff80e0',rune:'#ff40c0',frag:['#ff40c0','#2e1a48','#0a0514']},
+  arms:_bossStyleArms('tentacle'),
+  horns:function(g,B,G,P,now){
+    var n=7;
+    for(var i=0;i<n;i++){
+      var t=i/(n-1);
+      var bx=G.headX+Math.round(G.headW*t);
+      var hgt=Math.round(G.headH*(0.20+0.26*Math.sin(Math.PI*t)));
+      for(var s=0;s<hgt;s++){
+        var wdt=Math.max(1,Math.round((1-s/Math.max(1,hgt))*3));
+        _px(g,bx-Math.round(wdt/2),G.headY-s-1,wdt,1,s>hgt*0.6?P.glow:P.edge);
+      }
+    }
+  },
+  head:function(g,B,G,P){
+    for(var ry=0;ry<G.headH;ry++){
+      var t=ry/G.headH;
+      var rr=Math.max(2,Math.round(G.headW*(0.42+0.58*Math.min(1,t*1.7))));
+      _px(g,G.headX+Math.round((G.headW-rr)/2),G.headY+ry,rr,1,ry<G.headH*0.12?P.edge:P.body);
+    }
+  },
+  eyes:function(g,B,G,P,now,st){
+    var ey=G.headY+Math.round(G.headH*0.40);
+    var r=Math.max(2,Math.round(G.headW*0.075));
+    var pts=[[G.headX+Math.round(G.headW*0.28),ey],
+             [G.headX+Math.round(G.headW*0.72),ey],
+             [G.headX+Math.round(G.headW*0.50),ey-Math.round(G.headH*0.20)]];
+    if(st==='dormant'){ for(var i=0;i<3;i++) _px(g,pts[i][0]-r,pts[i][1],r*2+1,1,'#2a0a22'); return; }
+    var dead=(st==='dead');
+    for(var k=0;k<3;k++){
+      _pxDisc(g,pts[k][0],pts[k][1],r+1,'#0d0416');
+      _pxDisc(g,pts[k][0],pts[k][1],r,dead?'#5a2048':P.eye);
+    }
+    if(!dead){
+      g.save(); g.globalAlpha=0.30+0.25*Math.sin(now*3.8); g.fillStyle=P.eyeCore;
+      for(var m=0;m<3;m++){ g.beginPath(); g.arc(pts[m][0],pts[m][1],r*1.9,0,Math.PI*2); g.fill(); }
+      g.restore();
+    }
+  },
+  mouth:function(g,B,G,P,now,st,mo){
+    var mouthW=Math.max(6,Math.round(G.headW*0.60));
+    var mouthH=Math.max(3,Math.round(G.headH*0.20));
+    var mouthX=G.headX+Math.round((G.headW-mouthW)/2);
+    var mouthY=G.headY+G.headH-Math.round(mouthH*0.85);
+    var openH=Math.max(2,Math.round(mouthH*(0.5+1.0*mo)));
+    _px(g,mouthX,mouthY,mouthW,openH,'#05020a');
+    _px(g,mouthX,mouthY,mouthW,1,P.edge);
+    _px(g,mouthX,mouthY+openH-1,mouthW,1,P.edge);
+    if(mo>0.02&&st!=='dead'){
+      g.save(); g.globalAlpha=mo*0.6; _px(g,mouthX+2,mouthY+1,mouthW-4,Math.max(1,openH-2),P.glow); g.restore();
+    }
+  },
+  armor:function(g,B,G,P,now,st){
+    var x=B.x,y=B.y,w=B.w,h=B.h;
+    var torY=y+Math.round(h*0.38), torH=Math.max(4,h-(torY-y));
+    var cx=x+Math.round(w*0.5), cy=torY+Math.round(torH*0.45);
+    g.save(); g.globalAlpha=st==='dead'?0.15:(0.5+0.35*Math.sin(now*2.2));
+    _pxLine(g,cx-10,cy,cx,cy-9,P.glow); _pxLine(g,cx,cy-9,cx+10,cy,P.glow);
+    _pxLine(g,cx+10,cy,cx,cy+9,P.glow); _pxLine(g,cx,cy+9,cx-10,cy,P.glow);
+    _pxDisc(g,cx,cy,2,P.eyeCore);
+    g.restore();
+  } }
+];
+var _BOSS_STYLE_BY_ID = {};
+(function(){
+  for(var i=0;i<_BOSS_STYLES.length;i++) _BOSS_STYLE_BY_ID[_BOSS_STYLES[i].id]=_BOSS_STYLES[i];
+})();
+function _bossStyleOf(boss){
+  var id=(boss&&boss.style)?String(boss.style):'';
+  return _BOSS_STYLE_BY_ID[id]||_BOSS_STYLE_BY_ID['inferno'];
+}
+/* 变体绘制（公共前后段由 drawBossTo 负责：苏醒淡入 / 死亡淡出 / 碎片 / 沉睡 Z / 编辑器半径圈） */
+function _drawBossVariant(g, boss, V, now){
+  var x=Math.round(boss.x), y=Math.round(boss.y);
+  var w=Math.round(boss.w), h=Math.round(boss.h);
+  var P=V.P;
+  var hurt=boss._hurtFlash||0;
+  if(hurt>0){
+    var kk=Math.min(1,hurt/0.25)*0.72;
+    P={ body:_mixHex(P.body,'#ffffff',kk), plate:_mixHex(P.plate,'#ffffff',kk),
+        dark:_mixHex(P.dark,'#ffffff',kk*0.6), edge:_mixHex(P.edge,'#ffffff',kk),
+        bone:P.bone, glow:P.glow, eye:P.eye, eyeCore:P.eyeCore, rune:P.rune, frag:P.frag };
+  }
+  var dead=(boss.state==='dead'), awake=(boss.state==='awake');
+  var B={ x:x,y:y,w:w,h:h, dead:dead, awake:awake,
+    dp:dead?Math.min(1,Math.max(0,(boss._deathT||0)/(boss._deathTime||2.0))):0,
+    mouth:Math.max(0,Math.min(1,boss._mouth||0)) };
+  var G=_bossHeadGeom(B,{});
+  var st=dead?'dead':(awake?'awake':'dormant');
+  var mo=B.mouth;
+  (V.arms||_bossArms)(g,B,P,now,{});
+  (V.torso||_bossTorso)(g,B,P,now,{});
+  (V.armor||_bossDefArmor)(g,B,G,P,now,st);
+  (V.horns||_bossDefHorns)(g,B,G,P,now);
+  (V.head||_bossHeadRows)(g,B,G,P,{});
+  (V.eyes||_bossDefEyes)(g,B,G,P,now,st);
+  (V.mouth||_bossDefMouth)(g,B,G,P,now,st,mo);
+  if(V.extras) V.extras(g,B,G,P,now,st);
+}
+
 function drawBossHpBar(g, W, H, boss){
   if(!boss)return;
   if(boss.state!=='awake'&&boss.state!=='dead')return;
@@ -6964,6 +8297,7 @@ function makeBoss(el){
   return {
     id:(el.id!==undefined?el.id:''),
     x:el.x,y:el.y,w:el.w||160,h:el.h||120,
+    style:(el.style||'inferno'),          /* ★BOSS 造型 id★（缺省 = 原版恶魔） */
     state:'dormant',hp:(el.maxHp!==undefined?el.maxHp:12),maxHp:(el.maxHp!==undefined?el.maxHp:12),
     activeRadius:(el.activeRadius!==undefined?el.activeRadius:96),
     sleepDelay:(el.sleepDelay!==undefined?el.sleepDelay:4),
