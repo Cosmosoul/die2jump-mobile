@@ -114,8 +114,37 @@ function trophyKey(id){return (Game.levels[Game.selected]?.key||'')+'::'+id;}
 window.TrophyStore={has:id=>!!Game.save.trophies[trophyKey(id)],
   add(id){Game.save.trophies[trophyKey(id)]=true;persist();AudioSystem.sfx('trophy');notify('获得奖杯 · 已永久收藏');},
   count(){return Object.keys(Game.save.trophies).length;},clear(){Game.save.trophies={};persist();}};
-function notify(t){Game.toast={text:String(t),until:clock+2.8};}
+function notify(t){Game.toast={text:String(t),born:clock,until:clock+TOAST_HOLD+TOAST_SLIDE+0.05};}
 window.toast=notify;
+/* ★局内弹出式小提示（toast）★ —— 右侧边缘偏上、从右侧边缘伸出、1.5s 后收回右侧边缘消失。
+   用户原话：「将PC版本游戏局内的拿到旗子插下旗子之类的提示移到界面右侧边缘处偏上方位置区域，
+   不遮挡当前任何UI的地方，提示弹出方式为从右侧边缘伸出，1.5s后收回进右侧边缘消失」。
+   · 位置：右边缘内缩 14px、顶边 y=74 —— 暂停键在 y16..60（右上）、计时面板居中、
+     旗子库存/慢放条在左下、关卡名在右下，全部不遮挡；
+   · 动画：0.30s 从右侧边缘外伸入（easeOut）→ 保持至 1.5s → 0.30s 收回进右侧边缘（easeIn）；
+   · 宽度按文字实测自适应（150~min(320,W-60)），超宽按实测截断补「…」，绝不溢出屏幕。
+   旧的底部居中金条（y=H-104）已退役：它会压住左下角旗子库存与慢放条。 */
+const TOAST_HOLD=1.5,TOAST_SLIDE=0.30;
+function drawToast(){
+  const t=Game.toast;if(!t)return;
+  const born=(t.born!=null?t.born:clock-(TOAST_HOLD+TOAST_SLIDE));
+  const age=clock-born;
+  if(age<0||age>TOAST_HOLD+TOAST_SLIDE)return;
+  const mul=1.05,maxW=Math.min(320,Math.max(120,W-60));
+  const label=fitName(t.text,maxW-34,mul);
+  const w=Math.max(150,Math.min(maxW,textW(label,mul)+34));
+  const h=38,x=W-14-w,y=74;
+  let p;                                              /* 0=完全在右边缘外，1=完全到位 */
+  if(age<TOAST_SLIDE)p=MOTION.easeOut(age/TOAST_SLIDE);
+  else if(age<=TOAST_HOLD)p=1;
+  else p=1-MOTION.easeIn((age-TOAST_HOLD)/TOAST_SLIDE);
+  if(p<=0.004)return;
+  const dx=Math.round((1-p)*(w+18));                  /* 伸出/收回的位移量（ px ） */
+  g.save();g.globalAlpha=Math.min(1,p);
+  panel(x+dx,y,w,h,{tone:'gold',r:10});
+  textLeft(label,x+dx+18,y+h/2,C.ink,mul);
+  g.restore();
+}
 
 /* ---------------------------------------------------------------- 位图文字 */
 /* text(s,x,y,color,mul,alpha,outline)：以 (x,y) 为中心绘制。
@@ -952,7 +981,6 @@ function drawMenuPopup(){
     case 'exitConfirm':confirmScreen('exitConfirm');break;
   }
   g.restore();
-  g.save();g.globalAlpha=.7;text('按 ESC 或点击空白处关闭',W/2,H-24,C.inkFaint,.96);g.restore();
 }
 /* 局外面板的“空气感”：浮尘 + 极淡顶部光晕（只在菜单与选关页调用，局内不调用） */
 function skyMotes(){motes(0,0,W,H*.94,26,7);}
@@ -961,6 +989,10 @@ function trophyPlate(ex,ey,taken,total){const w=228,h=52,x=ex-w,y=ey;panel(x,y,w
 /* --------------------------------------------------------------- 选择关卡 */
 function drawLevelSelect(recs,title){
   header(title,'');
+  /* ★预热对准当前这份 recs★（主菜单浮窗可能开的是 levels2「更多关卡」，与 Game.levels
+     不是同一批）。drawLevelSelect 每帧都会被调用，这里只在不一致时纠偏一次（零开销）。
+     不发这个指令时，levels2 的缩略图永远焐不到 ⇒ 黑框。 */
+  if(_prewarmRecs!==recs){_prewarmRecs=recs;_prewarmHdrDone=false;_prewarmI=0;}
   /* ★奖杯计数已移至「成就」界面；选关页（含菜单内弹窗）不再常驻显示★ */
   const per=colsPerRow(),start=Game.page*per,gap=28,cw=Math.min(258,(W-190-gap*(per-1))/per),ch=Math.min(300,H-244),y=Math.max(114,(H-ch)/2+16),count=Math.min(per,Math.max(0,recs.length-start)),offset=(W-(cw*count+gap*Math.max(0,count-1)))/2;
   if(!recs.length){panel(W/2-250,y+20,500,120);text('尚无可用关卡',W/2,y+70,C.ink,1.36);}
@@ -1135,7 +1167,8 @@ function settings(paused=false){
     button('resume','返回游戏',x+28,by,bw,44,()=>pause(),{primary:true,icon:'play'});
     button('returnLevels','返回选关',x+28+bw+15,by,bw,44,()=>{change('menu');openMenuPopup('levels');},{icon:'flag'});
     button('replayLevel','重玩本关',x+28+2*(bw+15),by,bw,44,()=>begin(Game.selected),{icon:'play'});
-    text('按 ESC 继续游戏',W/2,y+ph-16,C.inkFaint,1.02);
+    /* ★底部「按 ESC 继续游戏」提示已删除★（用户：「不要画蛇添足」）。
+       ESC 继续的功能本身保留在 keydown 分支里，不受影响。 */
   }else{
     button('resetSave','清除存档',x+pw/2-124,y+ph-66,248,44,()=>{closeMenuPopup();change('resetConfirm');},{icon:'exit'});
     text('清空进度、奖杯、纪录与声音设置',W/2,y+ph-16,C.inkFaint,1.06);
@@ -1248,13 +1281,16 @@ function renderUI(){g.setTransform(dpr*scale,0,0,dpr*scale,0,0);g.clearRect(0,0,
     case'playing':if(Play&&Play.menuMode){
         if(Game.menuIntro||(Game.menuBoot||0)<1)drawMenuBootOverlay();
         else if(Game.menuPopup)drawMenuPopup();
-        else{const _hp=0.55+0.45*Math.max(0,Math.sin(clock*2));g.save();g.globalAlpha=_hp;text('跳到发光开关上开启功能 · 按 ESC 或点击空白处关闭',W/2,H-26,C.inkFaint,.96);g.restore();}}
+        /* ★底部「跳到发光开关上开启功能 · 按 ESC 或点击空白处关闭」提示已删除★
+           （用户：「PC版所有菜单的底部提示文字全删掉……不要画蛇添足」）。
+           ESC 关闭浮窗保留（keydown 分支）；「点击空白处关闭」已一并移除（见 pointerdown）。 */
+      }
       else hud();break;
     case'pause':if(Game.menuPopup)drawMenuPopup();else settings(true);break;   /* 暂停：浮窗优先，否则悬浮于游戏画面 */
     case'win':result(true);break;case'fail':result(false);break;
     case'resetConfirm':confirmScreen('resetConfirm');break;case'exitConfirm':confirmScreen('exitConfirm');break;
     case'quit':titleBlock(W/2,H*.36,1.1);text('冒险已结束 · 进度已保存',W/2,H*.58,C.skyInk,1.2);text('可以安全关闭此窗口',W/2,H*.65,C.skyInkDim,1.0);button('backToMenu','返回主菜单',W/2-120,H*.74,240,46,()=>change('menu'));break;}
-  if(Game.toast&&Game.toast.until>clock){const s=Game.toast.text;panel(W/2-238,H-104,476,42,{tone:'gold'});text(s,W/2,H-83,C.ink,1.05);}
+  if(Game.toast&&Game.toast.until>clock)drawToast();
   drawRipples();
   if(Game.transition>0){g.save();g.globalAlpha=Game.transition*.22;rect(0,0,W,H,'#ffffff');g.restore();}
   rollButtons();syncAccess();}
@@ -1347,8 +1383,11 @@ window.addEventListener('pointerdown',e=>{point(e);
   /* 启动页（菜单关卡 · 世界隐藏态）：首次点击 = 开始揭示（不是切页面） */
   if(!window.MOBILE_MODE&&Game.menuIntro){if(window.MU&&MU.enableGyro)MU.enableGyro();startGame();return;}
   if(Game.state==='boot'){if(window.MU&&MU.enableGyro)MU.enableGyro();startGame();return;}
-  /* 菜单弹窗打开时：点中控件则交由其处理（含滑条拖拽），点空白处（无控件）则关闭弹窗。 */
-  if(Game.menuPopup){const b=buttons.find(v=>inRect(pointer,v)&&!v.disabled);if(!b){closeMenuPopup();return;}if(b.slider){dragSlider=b.id;e.preventDefault();}return;}
+  /* 菜单弹窗打开时：点中控件则交由其处理（含滑条拖拽）。
+     ★「点空白处关闭弹窗」已删除★（用户原话：「把ESC关闭菜单弹窗的功能保留，但是点击空白处
+     关闭的功能删掉，PC版不许点击空白处直接关闭界面」）—— ESC 的关闭行为见下方 keydown 分支，
+     此处对空白处点击不再做任何处理（也不会关掉任何界面）。 */
+  if(Game.menuPopup){const b=buttons.find(v=>inRect(pointer,v)&&!v.disabled);if(b&&b.slider){dragSlider=b.id;e.preventDefault();}return;}
   const b=buttons.find(v=>inRect(pointer,v));if(b&&b.slider){dragSlider=b.id;e.preventDefault();}});
 window.addEventListener('keydown',e=>{const code=e.code;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Escape'].includes(code))e.preventDefault();
   /* 启动页（菜单关卡 · 世界隐藏态）：首次任意键 = 开始揭示（不是切页面） */
@@ -1514,6 +1553,7 @@ function warmPageHeader(per,recs){
      旧清单只写了描边色、漏了主色，也没有 styledText 变体 ⇒ 手机端每次进页
      都要冷烘「选择关卡」。三路补齐后两端都不再冷烘。 */
   S('选择关卡',C.ink);S('选择关卡','rgba(5,3,14,0.78)');S('选择关卡','#ffffff');
+  S('更多关卡',C.ink);S('更多关卡','rgba(5,3,14,0.78)');S('更多关卡','#ffffff');
   S('返回',C.ink);S('返回','#ffffff');
   S('设置',C.ink);S('游戏说明',C.ink);
   /* 奖杯盘：`奖杯` + `已收集 / 总数`。
@@ -1568,7 +1608,10 @@ let _prewarmRecs=null,_prewarmI=0,_prewarmPer=3,_prewarmLive=false,_prewarmHdrDo
 function _prewarmOrder(){
   const per=_prewarmPer>0?_prewarmPer:3;
   const page=Math.max(0,Game.page|0);
-  const N=Game.levels.length;
+  /* ★关数必须取 _prewarmRecs（当前正在预热的那份名单）★
+     选关浮窗可能是 levels2「更多关卡」（与 Game.levels 不是同一批、关数也不同），
+     旧版写死 Game.levels.length 会算出「别的页」⇒ 真正的当前页缩略图仍要同步现算。 */
+  const N=_prewarmRecs?_prewarmRecs.length:0;
   const seg=p=>{const a=Math.max(0,p*per),b=Math.min(N,(p+1)*per),out=[];
     for(let k=a;k<b;k++)out.push(k);return out;};
   return {order:seg(page).concat(seg(page-1),seg(page+1)),per};
@@ -1613,8 +1656,17 @@ const PREWARM_BUDGET_LEVELS_MS=14;
 function pumpPreviewPrewarm(budgetMs){
   if(!_prewarmLive||!_prewarmRecs)return;
   const s=Game&&Game.state;
-  if(s==='playing'||s==='pause'||s==='win'||s==='fail')return;   /* 局内让路 */
-  const onLevels=(s==='levels');
+  /* ★选关浮窗也必须预热★（用户原话：「必须要在保证性能的前提下恢复关卡界面卡片预览关卡的
+     预览图显示……应该一直都显示」）。
+     根因：主菜单的「选择关卡 / 更多关卡」是**浮窗**（state 仍是 'playing' + Play.menuMode），
+     旧版被下面那句「局内让路」一并挡下 ⇒ 浮窗里的缩略图永远是黑框；只有进过一次真关、
+     从结算页「返回选关」走到 state='levels' 把缓存焐热之后才显示 —— 正是用户报的现象。
+     判据收紧为：**真对局**（playing/pause/win/fail 且没有选关浮窗打开）才让路；
+     浮窗打开时关卡画面本就冻结（不推进物理），此时预热不抢玩家操作的主线程。 */
+  const popupLevels=(Game.menuPopup==='levels'||Game.menuPopup==='levels2');
+  const inRealGame=(s==='playing'||s==='pause'||s==='win'||s==='fail')&&!popupLevels;
+  if(inRealGame)return;                              /* 真局内让路 */
+  const onLevels=(s==='levels')||popupLevels;
   const budget=(budgetMs==null?(onLevels?PREWARM_BUDGET_LEVELS_MS:PREWARM_BUDGET_MS):budgetMs);
   const t0=performance.now();
   /* ★页首固定元素必须最先热★
