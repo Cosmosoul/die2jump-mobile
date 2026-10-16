@@ -1351,6 +1351,32 @@
     'smokeEnter': { dur: 0.50, gen: function (o, s, r) { p_noise(o, s, 0, 0.45, 0.3, 0.08, 3.5, r); } },
     'slow': { dur: 0.60, gen: function (o, s, r) { p_tone(o, s, 0, 0.55, 800, 180, 0.4, 'tri', 0.01, 2.5); } },
     'laserHit': { dur: 0.25, gen: function (o, s, r) { p_noise(o, s, 0, 0.16, 0.18, 0.12, 14, r); p_tone(o, s, 0, 0.16, 900, 260, 0.26, 'tri', 0.003, 12); } },
+    /* ---- ★新机制（2026-10-15）★ 弹跳方块 / 可动砖块 / 果冻区域 ----
+       用户要求「这些新机制也要有适当的音效，但不要太多太冗杂，要尽可能合适、尽可能贴切」
+       ⇒ 只加 4 条：弹跳、可动砖骤停、果冻进入、果冻离开。全部走既有 p_tone/p_fm/p_noise
+       合成器，不引入任何新素材；音色统一"软、闷、短"，与既有 jump/land/waterEnter 同族。 */
+    /* 弹跳方块：弹性上滑 + 一层塑料亮音（"绷"的一声），比 jump 更"弹" */
+    'bounce': { dur: 0.30, vol: 0.60, gen: function (o, s, r) {
+      p_tone(o, s, 0, 0.20, 300, 980, 0.42, 'sine', 0.003, 9);
+      p_tone(o, s, 0.005, 0.14, 900, 1800, 0.13, 'tri', 0.002, 12);
+      p_fm(o, s, 0, 0.16, 240, 120, 0.20, 1.0, 3.2, 0.004, 10);
+    } },
+    /* 可动砖块骤停：低频冲击 + 摩擦碎响 + 一点金属余振（与"金属方块"质感对应） */
+    'moverStop': { dur: 0.45, vol: 0.66, gen: function (o, s, r) {
+      p_tone(o, s, 0, 0.22, 150, 58, 0.55, 'sine', 0.002, 6.5);
+      p_noise(o, s, 0, 0.10, 0.26, 0.16, 10, r);
+      p_fm(o, s, 0.02, 0.30, 520, 300, 0.15, 2.4, 4.0, 0.004, 6);
+    } },
+    /* 果冻进入：陷入凝胶 —— 闷闷的上滑 + 粘稠气泡声 */
+    'jellyEnter': { dur: 0.34, vol: 0.58, gen: function (o, s, r) {
+      p_tone(o, s, 0, 0.20, 220, 640, 0.34, 'sine', 0.010, 8);
+      p_noiseSweep(o, s, 0, 0.16, 0.15, 0.05, 0.30, 12, r, false);
+    } },
+    /* 果冻离开：脱出凝胶 —— 下滑"啵"，与进入形成成对听感 */
+    'jellyExit': { dur: 0.30, vol: 0.54, gen: function (o, s, r) {
+      p_tone(o, s, 0, 0.18, 620, 200, 0.30, 'sine', 0.006, 9);
+      p_noiseSweep(o, s, 0.01, 0.14, 0.13, 0.28, 0.05, 12, r, false);
+    } },
     'ghost': { dur: 0.70, gen: function (o, s, r) { p_tone(o, s, 0, 0.65, 520, 540, 0.25, 'sine', 0.08, 2.5); p_tone(o, s, 0, 0.65, 522, 542, 0.22, 'sine', 0.08, 2.5); p_noise(o, s, 0, 0.5, 0.06, 0.05, 2, r); } },
     'uiHover': { dur: 0.08, gen: function (o, s, r) { p_tone(o, s, 0, 0.05, 1200, 1400, 0.18, 'sine', 0.002, 16); } },
     'uiClick': { dur: 0.11, gen: function (o, s, r) { p_tone(o, s, 0, 0.06, 880, 1320, 0.26, 'sine', 0.002, 18); p_tone(o, s, 0.03, 0.07, 1320, 1760, 0.16, 'tri', 0.002, 16); } },
@@ -1554,6 +1580,7 @@
     'doublejump': 'doubleJump', 'walljump': 'wallJump', 'wall_jump': 'wallJump',
     'waterenter': 'waterEnter', 'waterexit': 'waterExit', 'smokeenter': 'smokeEnter',
     'fallingspike': 'fallingSpike', 'laserhit': 'laserHit', 'flagplace': 'flagPlace',
+    'jellyenter': 'jellyEnter', 'jelly_enter': 'jellyEnter', 'jellyexit': 'jellyExit', 'jelly_exit': 'jellyExit', 'moverstop': 'moverStop', 'mover_stop': 'moverStop',
     'flagpull': 'flagPull', 'flagpickup': 'flagPickup', 'dooropen': 'doorOpen',
     'doorclose': 'doorClose', 'ui_hover': 'uiHover', 'ui_click': 'uiClick',
     'uiclick': 'uiClick', 'uihover': 'uiHover', 'double_jump': 'doubleJump',

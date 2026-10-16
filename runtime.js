@@ -1462,6 +1462,7 @@ function drawBgShape(g, sh, x, y, w, h, alpha, time, editorMode, inCurrent, neig
       var shR = x + w, shB = y + h;
       for (var ni = 0; ni < neighbors.length; ni++) {
         var no = neighbors[ni];
+        if (no === sh) continue;   /* ★跳过自身★：编辑器现在按 chamberId 分桶传邻居，桶内含自己 */
         var noR = no.x + no.w, noB = no.y + no.h;
         if (Math.abs(no.y - shB) < 3 && no.x < shR && noR > x) hasN = true;
         if (Math.abs(sh.y - noB) < 3 && no.x < shR && noR > x) hasS = true;
@@ -4139,26 +4140,35 @@ function drawFoamTo(g, el, adj){
   var yy = y + inset, hh = Math.max(1, h - inset * 2);
 
   g.save();
-  /* 主体：淡青白，带呼吸明暗 */
-  var base = 214 + Math.round(28 * breathe);
-  g.fillStyle = 'rgba(' + (base - 20) + ',' + (base + 2) + ',' + (base + 16) + ',0.94)';
+  /* ★配色 v2：黄色海绵 + 黑色洞洞★
+     用户原话：「泡沫砖配色太像冰块。把泡沫砖改为黄色带黑色洞洞花纹的海绵贴图」。
+     旧版是淡青白（rgba(base-20, base+2, base+16)，base≈214~242）—— 蓝白调，
+     在冰区 / 水域里与冰块几乎同色。新版改成**暖黄海绵**：
+       主体 #f2c92e（随呼吸明暗）· 上缘亮黄高光 · 下缘焦糖阴影 ·
+       内部按 `_pr` 确定性打**黑色孔洞**（1~2px，大孔带一圈暗黄凹边 ⇒ 有"凹坑"厚度感）·
+       外框改成深焦糖色 ⇒ 一眼读作"海绵"而不是"冰"。 */
+  var base = 0.86 + 0.14 * breathe;
+  g.fillStyle = 'rgba(' + Math.round(242 * base) + ',' + Math.round(201 * base) + ',' + Math.round(46 * base) + ',0.96)';
   g.fillRect(x, yy, w, hh);
   /* 上缘高光 / 下缘阴影（软材质读法） */
-  g.fillStyle = 'rgba(245,255,255,' + (0.55 + 0.25 * breathe).toFixed(3) + ')';
+  g.fillStyle = 'rgba(255,244,170,' + (0.55 + 0.25 * breathe).toFixed(3) + ')';
   g.fillRect(x, yy, w, 1);
-  g.fillStyle = 'rgba(150,182,200,0.75)';
+  g.fillStyle = 'rgba(168,120,20,0.85)';
   g.fillRect(x, yy + hh - 1, w, 1);
-  /* 内部气泡孔洞：确定性散点（同一块砖每帧一致，不闪） */
+  /* 内部黑色洞洞：确定性散点（同一块砖每帧一致，不闪） */
   var seed = (el.x * 0.37 + el.y * 0.71);
-  for (var i = 0; i < 5; i++) {
+  var holes = Math.max(4, Math.round(w * h / 9));
+  for (var i = 0; i < holes; i++) {
     var r1 = _pr(seed + i * 13.7), r2 = _pr(seed + i * 29.3), r3 = _pr(seed + i * 41.9);
     var bx = x + 1 + Math.floor(r1 * Math.max(1, w - 2));
     var by = yy + 1 + Math.floor(r2 * Math.max(1, hh - 2));
-    if (r3 > 0.55) {                        /* 暗孔 */
-      g.fillStyle = 'rgba(150,190,210,0.85)';
+    if (r3 > 0.72) {                        /* 大孔：2×2 黑洞 + 暗黄凹边 */
+      g.fillStyle = 'rgba(150,104,12,0.85)';
+      g.fillRect(bx, by, 2, 2);
+      g.fillStyle = 'rgba(24,18,4,0.95)';
       g.fillRect(bx, by, 1, 1);
-    } else {                                /* 亮泡 */
-      g.fillStyle = 'rgba(255,255,255,0.95)';
+    } else {                                /* 小孔：1px 黑洞 */
+      g.fillStyle = 'rgba(26,20,6,0.92)';
       g.fillRect(bx, by, 1, 1);
     }
   }
@@ -4170,13 +4180,408 @@ function drawFoamTo(g, el, adj){
     g.clearRect(px, py, 1, 1);
   }
   /* 外框：只在"外露"侧画（与 drawBlockPixel 的接缝修复同思路） */
-  g.strokeStyle = 'rgba(176,212,232,0.9)';
+  g.strokeStyle = 'rgba(176,120,16,0.95)';
   g.lineWidth = 1;
   if (!adj.up) { g.beginPath(); g.moveTo(x + 0.5, y + 0.5); g.lineTo(x + w - 0.5, y + 0.5); g.stroke(); }
   if (!adj.down) { g.beginPath(); g.moveTo(x + 0.5, y + h - 0.5); g.lineTo(x + w - 0.5, y + h - 0.5); g.stroke(); }
   if (!adj.left) { g.beginPath(); g.moveTo(x + 0.5, y + 0.5); g.lineTo(x + 0.5, y + h - 0.5); g.stroke(); }
   if (!adj.right) { g.beginPath(); g.moveTo(x + w - 0.5, y + 0.5); g.lineTo(x + w - 0.5, y + h - 0.5); g.stroke(); }
   g.restore();
+}
+
+/* ============ ★弹跳方块 / 可动砖块 / 果冻区域 —— 渲染层★ ============
+   （逻辑层见 updateBounces / updateMovers / updateJellies）
+
+   ★三条硬纪律★（与怪物/BOSS 系统同口径）
+     ① 双端逐字一致：严禁出现 `Ed.` / `LevelContext.`（一律 `Play.`，或只读元素自身）。
+     ② 确定性：相位一律由「元素坐标 + `_simTime()` / 传入的 `now`」算出，**零 Math.random()**。
+     ③ 不改既有语义：三个都是**新增**类型，老 levels.js 里根本没有它们 ⇒ 老关卡零回归。 */
+
+/* 十六进制 → [r,g,b]（新元素共用；刻意不依赖文件里既有的 `_hexRgb`，
+   避免与「语义差异」函数牵连）。 */
+function _hexToRgb3(c){
+  c=String(c||'#66f0ff').replace('#','');
+  if(c.length===3)c=c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+  return [parseInt(c.slice(0,2),16)||0,parseInt(c.slice(2,4),16)||0,parseInt(c.slice(4,6),16)||0];
+}
+
+/* ============ ★弹跳方块（bounce）★ ============
+   契约（用户原文）：「可配置边数，最小 3 边，最大 6 边，玩家碰到该板后立刻自动按照接触边的
+   反射定律快速反弹出去，方向遵循接触面上的反射定律，反弹初速度值可配，反弹出去在空中仍
+   遵守重力下落规则。砖块本身彩色霓虹发光质感。」
+
+   ▍几何：把方块当成**正多边形**（内接于元素矩形，半径 = min(w,h)/2，顶点朝上）。
+   ▍判定：用「玩家包围圆（半径 = max(w,h)/2） vs 正多边形」两级：
+       ① 圆心落在多边形内 → 法线 = 最近边的外法线，pen = 半径 − 有向距离；
+       ② 圆心在外、但到边界最近点距离 < 半径 → 法线 = 最近点→圆心方向。
+   ▍响应：**方向 = 入射速度关于该法线的镜面反射**（严格反射定律 v' = v − 2(v·n)n）；
+       入射速度近似为零时退化为沿法线弹出；**速度大小 = 元素配置的 `speed`** ⇒「初速度可配」。
+       弹出后把玩家沿法线推开 pen（很小），消除下一帧的重复触发；另有 `_cool` 冷却兜底。
+   ▍确定性：只用几何 + 元素状态，零 Math.random。 */
+
+var _BOUNCE_COLORS=['#ff4fd8','#4fe3ff','#7cff6b','#ffd24a','#ff6b6b','#b46bff'];
+function _bounceColorOf(el){
+  if(el.color)return el.color;
+  var i=Math.floor(_pr(el.x*0.31+el.y*0.17)*_BOUNCE_COLORS.length);
+  if(i<0)i=0;
+  if(i>=_BOUNCE_COLORS.length)i=_BOUNCE_COLORS.length-1;
+  return _BOUNCE_COLORS[i];
+}
+function _bounceGeom(el){
+  var n=Math.max(3,Math.min(6,Math.round(el.sides||4)));
+  var w=el.w||16,h=el.h||16;
+  var cx=el.x+w/2, cy=el.y+h/2, r=Math.min(w,h)/2;
+  /* ★可自由旋转★：`el.rot` = 角度(度)，缺省 0 ⇒ 顶点朝上（老关卡零回归）。
+     判定与渲染共用本函数 ⇒ 旋转后"接触面的反射法线"自动跟着转，无需另写逻辑。 */
+  var rot=-Math.PI/2+((el.rot||0)*Math.PI/180);
+  var pts=[];
+  for(var i=0;i<n;i++){
+    var a=rot+i*2*Math.PI/n;
+    pts.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r});
+  }
+  return {n:n,cx:cx,cy:cy,r:r,pts:pts};
+}
+function _bounceHit(p,gm){
+  var pcx=p.x+p.w/2, pcy=p.y+p.h/2;
+  var rp=Math.max(p.w,p.h)/2;
+  var inside=true, bestD=-1e9, bnx=0, bny=0;
+  for(var i=0;i<gm.n;i++){
+    var a=gm.pts[i], b=gm.pts[(i+1)%gm.n];
+    var ex=b.x-a.x, ey=b.y-a.y;
+    var len=Math.sqrt(ex*ex+ey*ey); if(len<1e-6)continue;
+    var nx=ey/len, ny=-ex/len;
+    var mx=(a.x+b.x)/2-gm.cx, my=(a.y+b.y)/2-gm.cy;
+    if(nx*mx+ny*my<0){nx=-nx;ny=-ny;}      /* 统一成外法线 */
+    var d=(pcx-a.x)*nx+(pcy-a.y)*ny;
+    if(d>0)inside=false;
+    if(d>bestD){bestD=d;bnx=nx;bny=ny;}
+  }
+  if(inside)return {hit:true,nx:bnx,ny:bny,pen:rp-bestD};
+  var cdist=1e18, cqx=0, cqy=0;
+  for(var j=0;j<gm.n;j++){
+    var a2=gm.pts[j], b2=gm.pts[(j+1)%gm.n];
+    var ex2=b2.x-a2.x, ey2=b2.y-a2.y;
+    var L2=ex2*ex2+ey2*ey2; if(L2<1e-6)continue;
+    var t=((pcx-a2.x)*ex2+(pcy-a2.y)*ey2)/L2;
+    if(t<0)t=0;
+    if(t>1)t=1;
+    var qx=a2.x+ex2*t, qy=a2.y+ey2*t;
+    var ddx=pcx-qx, ddy=pcy-qy;
+    var dd=Math.sqrt(ddx*ddx+ddy*ddy);
+    if(dd<cdist){cdist=dd;cqx=qx;cqy=qy;}
+  }
+  if(cdist<rp){
+    var rx=pcx-cqx, ry=pcy-cqy, rl=Math.sqrt(rx*rx+ry*ry)||1;
+    return {hit:true,nx:rx/rl,ny:ry/rl,pen:rp-cdist};
+  }
+  return null;
+}
+function drawBounceTo(g, el, playMode){
+  var gm=_bounceGeom(el);
+  var col=_bounceColorOf(el);
+  var rgb=_hexToRgb3(col);
+  var now=_simTime(); if(!now)now=Date.now()/1000;
+  var pulse=0.75+0.25*Math.sin(now*3.4+gm.cx*0.07);
+  g.save();
+  /* 外发光 + 半透明霓虹填充 */
+  g.shadowBlur=14*pulse; g.shadowColor=col;
+  g.beginPath();
+  for(var i=0;i<gm.n;i++){ if(i===0)g.moveTo(gm.pts[i].x,gm.pts[i].y); else g.lineTo(gm.pts[i].x,gm.pts[i].y); }
+  g.closePath();
+  g.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',0.22)';
+  g.fill();
+  g.shadowBlur=0;
+  /* 霓虹双线边框：外霓虹色（2px）+ 内白高光（1px） */
+  g.lineWidth=2; g.strokeStyle=col; g.stroke();
+  g.lineWidth=1; g.strokeStyle='rgba(255,255,255,'+(0.45+0.45*pulse).toFixed(3)+')'; g.stroke();
+  /* 内缩同心多边形：发光核心 */
+  g.globalAlpha=0.45+0.35*pulse;
+  g.strokeStyle=col; g.lineWidth=1;
+  g.beginPath();
+  for(var j=0;j<gm.n;j++){
+    var qx=gm.cx+(gm.pts[j].x-gm.cx)*0.5, qy=gm.cy+(gm.pts[j].y-gm.cy)*0.5;
+    if(j===0)g.moveTo(qx,qy); else g.lineTo(qx,qy);
+  }
+  g.closePath(); g.stroke();
+  g.globalAlpha=1;
+  g.restore();
+  /* 中心亮核 */
+  _pxDot(g,Math.round(gm.cx),Math.round(gm.cy),'#ffffff');
+  if(!playMode){
+    /* 编辑态：淡包围框（方便点选） */
+    g.save();
+    g.strokeStyle='rgba(255,255,255,0.22)'; g.lineWidth=0.4;
+    g.setLineDash([2,3]);
+    g.strokeRect(el.x-0.5,el.y-0.5,(el.w||16)+1,(el.h||16)+1);
+    g.setLineDash([]);
+    g.restore();
+  }
+}
+
+/* ============ ★可动砖块（mover）★ ============
+   契约（用户原文）：「可配置上下左右各个表面有没有刺（每个方向单独配置，配置后自动按方块
+   尺寸密铺一层荆棘刺），可配置移动轨迹和该段轨迹上的移动速度。到达终点会骤停，若玩家在该
+   砖块上（站立在上下表面或蹭在侧面均可）并给玩家向刚才的前进方向一个动量，与方块停止前的
+   移动速度有关。每个砖块可配置多段移动（但是下一段移动的起点务必接上上一段移动终点，整个
+   轨迹是一个整体），砖块从起点向终点移动，到达终点后再由终点向起点移动，向起点移动时速度
+   与每段配置一致轨迹相反。砖块是带有黄色危险标识线的金属方块质感。」
+
+   ▍轨迹格式（编辑器里两个文本框，都是分号分隔）：
+       path   = "dx,dy;dx,dy;…"   —— **相对上一段终点**的位移（像素）。
+                相对位移天然保证「下一段起点 = 上一段终点」，整条轨迹是一条连续折线。
+       speeds = "1.5;0.8;…"       —— 每段速度（像素/帧）；缺省或非正数回落到 `speed`。
+   ▍运动：沿折线往返。段内参数 `_prog` 0→1；正向走完第 k 段进第 k+1 段，走到最后一段尽头
+       → `_sdir=-1` 反向；反向走完第 0 段 → `_sdir=+1`。反向时**仍是同一批段**，只是沿段
+       反向行进 ⇒ 速度按各段配置、轨迹相反（与用户要求一致）。
+   ▍骤停 + 动量：只在**整条轨迹的两个端点**触发（中间拐点连续，不骤停）：吸附到端点、
+       速度清零、停顿 `pause` 秒，并给此刻附着在砖上的玩家一个沿「刚才前进方向」的冲量
+       `lastV × kick`（lastV = 停止前的速度向量，像素/帧）。
+   ▍附着：站立顶面 / 顶住底面 / 蹭左面 / 蹭右面 四种都算（`_moverAttach`）。
+   ▍确定性：零 Math.random。 */
+
+function _moverPath(el){
+  var raw=String(el.path||'').trim();
+  if(!raw)return [];
+  var parts=raw.split(';'), out=[];
+  for(var i=0;i<parts.length;i++){
+    var s=parts[i].trim(); if(!s)continue;
+    var ab=s.split(',');
+    if(ab.length<2)continue;
+    var dx=parseFloat(ab[0]), dy=parseFloat(ab[1]);
+    if(!isFinite(dx)||!isFinite(dy))continue;
+    if(Math.abs(dx)<1e-6&&Math.abs(dy)<1e-6)continue;   /* 零段直接忽略 */
+    out.push({dx:dx,dy:dy});
+  }
+  return out;
+}
+function _moverSpeeds(el,n){
+  var raw=String(el.speeds||'').trim();
+  var parts=raw?raw.split(';'):[];
+  var def=(el.speed!==undefined&&el.speed>0)?el.speed:0.6;
+  var out=[];
+  for(var i=0;i<n;i++){
+    var v=parseFloat(parts[i]);
+    out.push((isFinite(v)&&v>0)?v:def);
+  }
+  return out;
+}
+/* 每段停顿时长（秒）：`pauses="0.3;0.5"`，缺省回落 `el.pause`（默认 0.3）。 */
+function _moverPauses(el,n){
+  var raw=String(el.pauses||'').trim();
+  var parts=raw?raw.split(';'):[];
+  var def=(el.pause!==undefined&&el.pause>=0)?el.pause:0.3;
+  var out=[];
+  for(var i=0;i<n;i++){
+    var v=parseFloat(parts[i]);
+    out.push((isFinite(v)&&v>=0)?v:def);
+  }
+  return out;
+}
+function _moverSpikeRects(m){
+  var out=[], w=m.w||8, h=m.h||8;
+  var SH=Math.min(6,Math.max(3,Math.round(Math.min(w,h)*0.45)));
+  var i,n,u;
+  if(m.spikeU){ n=Math.max(1,Math.round(w/8)); u=w/n;
+    for(i=0;i<n;i++)out.push({x:m.x+u*i,y:m.y-SH,w:u,h:SH,dir:'up'}); }
+  if(m.spikeD){ n=Math.max(1,Math.round(w/8)); u=w/n;
+    for(i=0;i<n;i++)out.push({x:m.x+u*i,y:m.y+h,w:u,h:SH,dir:'down'}); }
+  if(m.spikeL){ n=Math.max(1,Math.round(h/8)); u=h/n;
+    for(i=0;i<n;i++)out.push({x:m.x-SH,y:m.y+u*i,w:SH,h:u,dir:'left'}); }
+  if(m.spikeR){ n=Math.max(1,Math.round(h/8)); u=h/n;
+    for(i=0;i<n;i++)out.push({x:m.x+w,y:m.y+u*i,w:SH,h:u,dir:'right'}); }
+  return out;
+}
+function _drawMoverSpike(g,r){
+  var x=Math.round(r.x), y=Math.round(r.y), w=Math.round(r.w), h=Math.round(r.h);
+  if(w<1||h<1)return;
+  var i,k,col;
+  if(r.dir==='up'||r.dir==='down'){
+    for(i=0;i<w;i++){
+      k=1-Math.abs((i+0.5)/w*2-1);
+      var sh=Math.max(1,Math.round(h*k));
+      col=(i%2===0)?'#ff5577':'#d01e42';
+      if(r.dir==='up')_px(g,x+i,y+h-sh,1,sh,col);
+      else _px(g,x+i,y,1,sh,col);
+    }
+    _pxDot(g,x+Math.floor(w/2),r.dir==='up'?y:y+h-1,'#ffd0d8');
+  }else{
+    for(i=0;i<h;i++){
+      k=1-Math.abs((i+0.5)/h*2-1);
+      var sw=Math.max(1,Math.round(w*k));
+      col=(i%2===0)?'#ff5577':'#d01e42';
+      if(r.dir==='left')_px(g,x+w-sw,y+i,sw,1,col);
+      else _px(g,x,y+i,sw,1,col);
+    }
+    _pxDot(g,r.dir==='left'?x:x+w-1,y+Math.floor(h/2),'#ffd0d8');
+  }
+}
+function _moverHazard(g,x,y,w,h){
+  for(var r=0;r<h;r++){
+    for(var i=0;i<w;i++){
+      _px(g,x+i,y+r,1,1,(((i+r)%4)<2)?'#ffcc22':'#141414');
+    }
+  }
+}
+function drawMoverTo(g, el, playMode){
+  var x=Math.round(el.x), y=Math.round(el.y);
+  var w=Math.round(el.w||8), h=Math.round(el.h||8);
+  if(w<1||h<1)return;
+  /* 金属主体：亮顶 / 中体 / 暗底 */
+  _px(g,x,y,w,h,'#4c545e');
+  _px(g,x,y,w,Math.max(1,Math.round(h*0.34)),'#6e7883');
+  _px(g,x,y,w,1,'#9aa6b2');
+  _px(g,x,y+h-1,w,1,'#242a31');
+  /* 金属拉丝竖纹（1px，低对比） */
+  for(var i=1;i<w-1;i+=3)_px(g,x+i,y+1,1,Math.max(1,h-2),'rgba(255,255,255,0.06)');
+  /* 四角铆钉 */
+  _pxDot(g,x+1,y+1,'#b8c4d0'); _pxDot(g,x+w-2,y+1,'#b8c4d0');
+  _pxDot(g,x+1,y+h-2,'#20262c'); _pxDot(g,x+w-2,y+h-2,'#20262c');
+  /* ★黄色危险标识线★：上下两条黄黑 45° 斜纹带 */
+  var band=Math.max(1,Math.min(3,Math.round(h*0.18)));
+  var off=Math.max(0,Math.round(h*0.34));
+  _moverHazard(g,x,y+off,w,band);
+  if(h>band*3)_moverHazard(g,x,y+h-band-off,w,band);
+  /* 编辑器：画出轨迹折线 + 终点方块，方便调路径 */
+  if(!playMode){
+    var segs=_moverPath(el);
+    if(segs.length){
+      var z=(typeof Ed!=='undefined'&&Ed&&Ed.zoom)?Ed.zoom:1;
+      var px2=el.x, py2=el.y, cxp=el.x+w/2, cyp=el.y+h/2;
+      g.save();
+      g.strokeStyle='rgba(255,204,34,0.85)';
+      g.lineWidth=1/z;
+      g.setLineDash([4/z,3/z]);
+      g.beginPath(); g.moveTo(cxp,cyp);
+      for(var k=0;k<segs.length;k++){ px2+=segs[k].dx; py2+=segs[k].dy; g.lineTo(px2+w/2,py2+h/2); }
+      g.stroke(); g.setLineDash([]);
+      g.fillStyle='rgba(255,204,34,0.95)';
+      g.fillRect(px2+w/2-2/z,py2+h/2-2/z,4/z,4/z);
+      g.restore();
+    }
+  }
+  /* 荆棘刺 */
+  var rects=_moverSpikeRects(el);
+  for(var s=0;s<rects.length;s++)_drawMoverSpike(g,rects[s]);
+}
+
+/* ============ ★果冻区域（jelly）★ ============
+   契约（用户原文）：「类似水或重力区域的区域性方块，玩家进入后像水中一样出现呼吸气泡并缓缓
+   收缩，收缩结束玩家立即死亡，行动速度略变慢但是重力加速度不变，体验上略带阻滞感。活动区域
+   进入或离开都需要持续向进入区域的方向按住移动按键 0.5s 才可进入，在上边界或侧上不持续进入
+   而是直接起跳的话可以直接像平台一样跳起或蹬墙跳；进入活动区域后在果冻区域中可以无限连跳，
+   但是一旦离开边界立刻丧失无限连跳能力。果冻区域希望有凝胶状半透明彩色质感，边界有液体轻微
+   摇晃质感，与边界接触或进出区域时整块果冻都会有果冻状 q 弹颤动 0.5s 后回正。」
+
+   ▍碰撞体 = **四片薄壳**（不是实心矩形）：
+       · 壳厚 t = clamp(1, floor(min(w,h)/6), 3)，内部完全空 ⇒ 玩家进去后能自由活动，
+         不会被「实心求解器」从最近的边弹出去（这是实心方案做不到的）。
+       · 站在顶壳 = 站上平台（可跳）；贴着侧壳 = `p.onWall` 置位（可蹬墙跳）——
+         用户要的「像平台一样跳起 / 蹬墙跳」是**免费**得到的，不需要任何额外代码。
+       · 壳同时从**内侧**挡住玩家 ⇒ 想出去同样要按 0.5s。
+   ▍通行证：持续按住「朝向区域」的方向键（在外）或「背离区域中心」的方向键（在内）满 0.5s
+       ⇒ 该区域 `_passT=0.6`（0.6 秒内四片壳全部不参与碰撞）⇒ 玩家走过去 / 走出来。
+       方向只取**水平主轴**：引擎只有 A/D 左右键（W/Up 是跳跃键，没有「下」键），
+       所以「按方向键进入」统一落在左右两侧 —— 站在顶上按 A/D 会先滑下侧面再进入，
+       而在顶上按跳跃键则照常起跳（符合用户「直接起跳就跳起」的描述）。
+   ▍窒息：区域内 `Play.jellyTimer` 按当前区域的 `holdTime`（缺省 6s）倒计时，归零即死；
+       离开区域立即回满。气泡半径随剩余比例收缩（与水中气泡同一套视觉语言）。
+   ▍阻滞：speedMul 0.72 / inertiaMul 1.7，**不动 gravityMul**（用户明确「重力加速度不变」），
+       并开启 `infiniteJump`（无限连跳）—— 离开区域 mods 不再施加 ⇒ 立刻丧失。
+   ▍确定性：零 Math.random（粒子颜色固定）。 */
+
+/* ★颤动时长(秒)★：用户反馈「太长太明显没必要，适当震一下就行了」⇒ 0.5 -> 0.22。
+   同时被 drawJellyTo 用来做幅度归一（amp = 0.05 * wob/JELLY_WOB）。 */
+var JELLY_WOB=0.22;
+function _jellyShells(el){
+  var x=el.x, y=el.y, w=el.w||32, h=el.h||32;
+  var t=Math.floor(Math.min(w,h)/6);
+  if(!(t>=1))t=2;
+  if(t>3)t=3;
+  /* ★左右壳不覆盖上/下壳的条带★（用户 2026-10-15：「果冻为啥从拐角和边长中部效果还不一样？」
+     —— 根因就是旧版四片壳在四个角**重叠**成 2×t 厚的 L 形，拐角比边长中部厚一倍 ⇒ 进出难度不同）。
+     现在四片壳互不重叠：上/下壳占满整宽，左/右壳只占中间的 (h-2t) 段 ⇒ 拐角与中部完全一致。 */
+  var mh=h-2*t; if(mh<1)mh=1;
+  return [
+    {x:x,y:y,w:w,h:t},
+    {x:x,y:y+h-t,w:w,h:t},
+    {x:x,y:y+t,w:t,h:mh},
+    {x:x+w-t,y:y+t,w:t,h:mh}
+  ];
+}
+function drawJellyTo(g, el, playMode){
+  var x=el.x, y=el.y;
+  var w=Math.round(el.w||32), h=Math.round(el.h||32);
+  if(w<2||h<2)return;
+  var now=_simTime(); if(!now)now=Date.now()/1000;
+  var col=el.color||'#4bd6a0';
+  var rgb=_hexToRgb3(col);
+  /* q 弹颤动：_wobT 从 0.5 衰减到 0；整体做各向异性缩放（体积感守恒） */
+  var wob=el._wobT||0;
+  if(wob>0&&playMode)el._wobT=Math.max(0,wob-0.02);
+  var kk=wob/JELLY_WOB;
+  var amp=0.05*kk;
+  var sx=1+amp*Math.sin(now*26), sy=1-amp*Math.sin(now*26);
+  var cx=x+w/2, cy=y+h/2;
+  g.save();
+  g.translate(cx,cy); g.scale(sx,sy); g.translate(-cx,-cy);
+  /* 凝胶主体（半透明彩色） */
+  g.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',0.26)';
+  g.fillRect(x,y,w,h);
+  /* 内部柔光（营造胶体厚度） */
+  g.globalAlpha=0.14;
+  g.fillStyle='#ffffff';
+  g.fillRect(x+1,y+1,Math.max(1,w-2),Math.max(1,Math.round(h*0.28)));
+  g.globalAlpha=1;
+  /* 上升气泡（确定性散点 + 相位） */
+  var nb=Math.max(3,Math.round(w*h/240));
+  for(var i=0;i<nb;i++){
+    var r1=_pr(el.x*0.13+el.y*0.29+i*7.3);
+    var r2=_pr(el.x*0.31+el.y*0.11+i*17.9);
+    var bx=x+2+r1*Math.max(1,w-4);
+    var ph=(now*0.35+r2*3)%1;
+    var by=y+h-2-ph*Math.max(1,h-4);
+    g.globalAlpha=0.55*(1-ph*0.6);
+    g.fillStyle='rgba(255,255,255,0.95)';
+    g.fillRect(Math.round(bx),Math.round(by),1,1);
+  }
+  g.globalAlpha=1;
+  /* 边界液体轻微摇晃：四条边各画一条正弦波线（相位不同 ⇒ 像液面） */
+  g.strokeStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',0.95)';
+  g.lineWidth=1;
+  var i2;
+  g.beginPath();
+  for(i2=0;i2<=w;i2+=2){
+    var oy=Math.sin(now*3.1+i2*0.5)*0.4;
+    if(i2===0)g.moveTo(x,y+oy); else g.lineTo(x+i2,y+oy);
+  }
+  g.stroke();
+  g.beginPath();
+  for(i2=0;i2<=w;i2+=2){
+    var oy2=Math.sin(now*2.7+i2*0.45+1.9)*0.4;
+    if(i2===0)g.moveTo(x,y+h+oy2); else g.lineTo(x+i2,y+h+oy2);
+  }
+  g.stroke();
+  g.beginPath();
+  for(i2=0;i2<=h;i2+=2){
+    var ox=Math.sin(now*3.5+i2*0.42+0.7)*0.4;
+    if(i2===0)g.moveTo(x+ox,y); else g.lineTo(x+ox,y+i2);
+  }
+  g.stroke();
+  g.beginPath();
+  for(i2=0;i2<=h;i2+=2){
+    var ox2=Math.sin(now*2.9+i2*0.47+2.6)*0.4;
+    if(i2===0)g.moveTo(x+w+ox2,y); else g.lineTo(x+w+ox2,y+i2);
+  }
+  g.stroke();
+  g.restore();
+  if(!playMode){
+    g.save();
+    g.strokeStyle='rgba(75,214,160,0.5)'; g.lineWidth=0.4;
+    g.setLineDash([3,3]);
+    g.strokeRect(x-0.5,y-0.5,w+1,h+1);
+    g.setLineDash([]);
+    g.restore();
+  }
 }
 
 /* ============ 旗杆渲染（表现层，纯视觉）============
@@ -4438,8 +4843,8 @@ function drawFlowerTo(g, fl, playMode){
      `triggerRadius` 直接决定"幽灵走到哪才枯萎"，没有示意图就只能靠猜，
      摆完进游戏发现判定不对（幽灵贴着花却不炸）却找不到原因。
      ★画法必须与 updateFlowers 的判定口径**完全一致**★：
-     判定用的是"幽灵中心到**花矩形最近点**的距离 < triggerRadius"，
-     等价于"幽灵中心落在 **花矩形向外膨胀 triggerRadius 的圆角矩形**内"。
+     判定用的是"**幽灵矩形**与**花矩形向外膨胀 triggerRadius 的圆角矩形**是否相交"，
+     （见 updateFlowers：只要幽灵的任意像素进入膨胀区域即触发，比"中心点"更早、更准）。
      所以这里画的是那个圆角矩形（直线边 + 四角圆弧），
      而不是一个"以花心为圆心的圆" —— 花被拉高/拉宽时后者会严重骗人。
      正式游戏 playMode=true ⇒ 完全不画。 */
@@ -5062,11 +5467,28 @@ function drawBulletTo(g, blt, now){
     _px(g,x+Math.round(w/2)-1,y-Math.min(5,h*2),1,Math.min(5,h*2),'#ff6a1a');
     g.globalAlpha=1;
   }else if(k==='ghostShot'){
-    /* 鬼魂子弹：一小团圆润的白蓝球（可爱但致命） */
-    _px(g,x,y,w,h,'#c8d8ff');
-    _px(g,x+1,y+1,Math.max(1,w-2),Math.max(1,h-2),'#eef3ff');
-    g.globalAlpha=0.35;
-    _px(g,x+Math.round(w/2)-1,y+Math.round(h/2)-1,w*2,h*2,'#9fc4ff');
+    /* ★鬼魂子弹 v2：红色 + 危迹★
+       用户原话：「发射子弹的怪物的子弹效果：现在子弹是灰色看不清，建议改为红色且有危迹」。
+       旧版是 `#c8d8ff/#eef3ff` 的灰白小球 —— 在冷色背景（水 / 雾 / 冰）里几乎看不见。
+       新版：高饱和红壳 + 白芯（本体一眼可辨），再加一条沿**速度反方向**的红色危迹尾
+       （3 段渐隐短划 + 垂直于速度的 2 颗警示刻度），把"它从哪来、往哪去"一并说清。
+       相位取自 `blt._ph`（开火时由 `_pr` 算好）⇒ 确定性、可复现。 */
+    var _vx2=blt.vx||0, _vy2=blt.vy||0;
+    var _vl=Math.sqrt(_vx2*_vx2+_vy2*_vy2)||1;
+    var _ux=-_vx2/_vl, _uy=-_vy2/_vl;         /* 尾迹方向 = 速度反方向 */
+    for(var _t2=0;_t2<3;_t2++){
+      var _d2=w*(0.9+_t2*0.85);
+      g.globalAlpha=0.55-_t2*0.16;
+      _px(g,x+_ux*_d2,y+_uy*_d2,Math.max(1,w-1),Math.max(1,h-1),'#ff2a3c');
+    }
+    g.globalAlpha=1;
+    _px(g,x,y,w,h,'#e01030');
+    _px(g,x,y,w,1,'#ff6a72');
+    _px(g,x+1,y+1,Math.max(1,w-2),Math.max(1,h-2),'#ff3b4d');
+    _pxDot(g,x+Math.round(w/2),y+Math.round(h/2),'#fff0f0');
+    g.globalAlpha=0.8;
+    _pxDot(g,x+Math.round(w/2)-_uy*2,y+Math.round(h/2)+_ux*2,'#ffd0d0');
+    _pxDot(g,x+Math.round(w/2)+_uy*2,y+Math.round(h/2)-_ux*2,'#ffd0d0');
     g.globalAlpha=1;
   }else if(k==='laser'){
     /* 激光：0.5s 预警细虚线 → 0.35s 实心光柱（从顶向下扫） */
@@ -6438,21 +6860,31 @@ function stepPlayerPhysics(p,keys,dt,solids,ghosts,mods){
   }
   if(!jump)p.jumpHold=0;
   if(jump&&!p.grounded&&p.canDoubleJump&&p.coyoteTimer<=0&&!p._prevJump){
-    p.vy=jumpMinV*0.95*p.gravityDir;
+    /* ★果冻区域：空中这一跳按「地面满跳」处理★（用户要求「在果冻里面的连跳应该是每次跳跃
+       都和在平台上跳跃的一样高」）：起跳速度用 jumpMinV（**不乘 0.95**），并置 jumpHold=1，
+       于是"按住不放"会继续抬升到 jumpMaxHeight —— 与站在平台上起跳完全同高。
+       非果冻时保持原样（原有的弱二段跳）。 */
+    if(mods.infiniteJump){p.vy=jumpMinV*p.gravityDir;p.jumpHold=1;}
+    else{p.vy=jumpMinV*0.95*p.gravityDir;}
     p.canDoubleJump=false;
     p.squashVY=-0.4;p.squashVX=-0.2;
   }
+  /* ★果冻区域：无限连跳★ —— 区域内每帧把二段跳资格还回来，于是"空中再按跳"永远可用；
+     离开区域后 mods 不再带 `infiniteJump`，资格恢复成正常的一次二段跳。 */
+  if(mods.infiniteJump&&!p.grounded)p.canDoubleJump=true;
   p._prevJump=jump;
   p.vy+=FEEL.gravity*_gravityMul*p.gravityDir;
   if(p.onWall!==0&&p.vy*p.gravityDir>0)p.vy=Math.min(p.vy,0.6*p.gravityDir);
   if(p.onWall!==0&&p.grounded){p.wallJumpUsed=false;}
   if(p.onWall!==0&&p.wallJumpUsed&&p.vy*p.gravityDir>0){p.vy=Math.min(p.vy,0.3*p.gravityDir);}
-  var _maxFall=mods.waterMode?Math.min(FEEL.maxFallSpeed,1.0):FEEL.maxFallSpeed;
+  /* ★果冻里最大下落速度 = 玩家手感最大下落速度的 1/10★（用户 2026-10-15 明确要求）。 */
+  var _maxFall=mods.waterMode?Math.min(FEEL.maxFallSpeed,1.0):(mods.jellyMode?(FEEL.maxFallSpeed*0.1):FEEL.maxFallSpeed);
   if(p.gravityDir>0)p.vy=Math.min(p.vy,_maxFall);
   else p.vy=Math.max(p.vy,-_maxFall);
   var steps=Math.max(1,Math.ceil(Math.max(Math.abs(p.vx),Math.abs(p.vy))/3));
   var stepVX=p.vx/steps,stepVY=p.vy/steps;
   var wasGrounded=p.grounded;
+  p._preX=p.x; p._preY=p.y;   /* ★弹跳方块扫掠用：本帧物理步进前的起点★ */
   p.grounded=false;p.onWall=0;
   for(var s=0;s<steps;s++){
     p.x+=stepVX;
@@ -7042,7 +7474,7 @@ PlayGhost.prototype.update=function(){
    传送门，观感正是"在没有传送门的位置也发生了瞬移"。
    （update() 里"跨过事件索引才累加"的语义也要求游标一并归零，
      否则 _tpCur 已指向表尾，重置后这一圈再也不会有门生效。） */
-PlayGhost.prototype.reset=function(){this.progress=0;this._tpCur=0;this._tpOx=0;this._tpOy=0;this._prevProgress=0;};
+PlayGhost.prototype.reset=function(){this.progress=0;this._tpCur=0;this._tpOx=0;this._tpOy=0;this._prevProgress=0;this._flowerSeen=[];this._flowerInside=[];};
 /* 把场上所有幽灵拉回各自轨迹的起点（PC 的 L 键 / 手机版「起点」键共用）。
    玩家本身不动、不扣血；返回被重置的幽灵数量。 */
 function rewindGhosts(){
@@ -7157,7 +7589,10 @@ var Play={
      · `bullets` 全部弹幕 · `boss` BOSS 单例 · `bossDoors` BOSS 门
      · `_bossHearts` BOSS 波次掉落的心（与既有 hearts 分开记，便于演出） */
   graves:[],skeletons:[],foes:[],bullets:[],boss:null,bossDoors:[],
-  _bossHearts:[]
+  _bossHearts:[],
+  /* ★新增元素（弹跳方块 / 可动砖块 / 果冻区域）★ */
+  bounces:[],movers:[],jellies:[],
+  jellyTimer:6,jellyMax:6,_inJelly:null,_jellySrc:null
 };
 
 function startPlay(){
@@ -7165,9 +7600,11 @@ function startPlay(){
   ['platforms','disappearPlats','spikes','fallingSpikes','lasers','doors','plates',
    'movables','breakables','flammables','iceBlocks','goals','hearts','flagPickups','gravityZones','labels','backgrounds','lamps','vines',
    'trophies','switches','switchDoors','waters','smokes','waterGrasses','foams','flagPoles','beasts','flowers','fires','portals',
-   'graves','skeletons','foes','bullets','bossDoors','_bossHearts'
+   'graves','skeletons','foes','bullets','bossDoors','_bossHearts',
+   'bounces','movers','jellies'
   ].forEach(function(k){Play[k]=[];});
   Play.boss=null;
+  Play.jellyTimer=6;Play.jellyMax=6;Play._inJelly=null;Play._jellySrc=null;
   /* ★BOSS 专属 BGM 闩锁随关卡复位★：换关/重开时若不清零，
      新关卡里 BOSS 激活后会因为 `_bossBgmOn` 仍是上一次的 true 而**不切歌**。
      同时把「当前关卡」记下来，供 `_pbossBgm(false)` 恢复关卡曲时定位种子
@@ -7247,6 +7684,17 @@ function startPlay(){
       case 'boss':Play.boss=makeBoss(c);break;
       /* ★BOSS 门（bossDoor）★：可配编号与 BOSS 绑定。BOSS 醒来 ⇒ 关；死亡/未激活 ⇒ 开。 */
       case 'bossDoor':c.open=true;c._openProgress=1;Play.bossDoors.push(c);break;
+      /* ★弹跳方块★：碰边按反射定律弹飞（详见 _bounceHit / updateBounces 的契约注释）。 */
+      case 'bounce':c._cool=0;Play.bounces.push(c);break;
+      /* ★可动砖块★：解析多段轨迹（相对位移，下一段起点 = 上一段终点）。 */
+      case 'mover':
+        c._segs=_moverPath(c);c._spds=_moverSpeeds(c,c._segs.length);c._pauses=_moverPauses(c,c._segs.length);
+        c._si=0;c._sdir=1;c._prog=0;c._pauseT=0;c._atEnd=false;
+        c._lastVX=0;c._lastVY=0;c._srects=null;
+        Play.movers.push(c);break;
+      /* ★果冻区域★：凝胶方块。边界是实心薄壳（可站 / 可蹬墙跳），
+         持续按方向键 0.5s 才可穿进 / 穿出。 */
+      case 'jelly':c._passT=0;c._wobT=0;c._wasInside=false;Play.jellies.push(c);break;
     }
   });
   // 复制背景层数据
@@ -8581,13 +9029,16 @@ function _bossSpawnShot(b,wv,k,p){
      "精准"也不是"弹幕"，是坏掉）。下限保证"威胁确实落在玩家左右两侧
      不远处"，而上限由 `aim=1` 给到接近全屏（向后兼容旧行为）。 */
   var aim=(wv.aimMul!==undefined?wv.aimMul:1)*((b._aMul!==undefined)?b._aMul:1);
-  if(aim<0.12)aim=0.12;
-  var half=Math.max(safeGap*1.35,viewW*0.44*aim);
+  if(aim<0.06)aim=0.06;                                 /* ★下限更低 ⇒ 最精准波次更集中★ */
+  var half=Math.max(safeGap*1.15,viewW*0.30*aim);       /* ★系数 0.44→0.30、safeGap 1.35→1.15★ */
   /* 采样：最多 24 次找一个不在安全缝里的 x */
   var sx=0,ok=false;
   var safeW=safeGap;
   for(var tryN=0;tryN<24;tryN++){
-    var u=(_bossRand(b,k*5.7+tryN*1.3)-0.5)*2;            /* −1..1 */
+    /* ★三角分布★：两个独立均匀变量取平均 ⇒ 中间更密、两端更疏，弹幕更贴玩家 */
+    var u1=(_bossRand(b,k*5.7+tryN*1.3)-0.5)*2;
+    var u2=(_bossRand(b,k*5.7+tryN*1.3+0.71)-0.5)*2;
+    var u=(u1+u2)*0.5;
     sx=px+u*half;
     /* 夹进视口内侧（留一点边距，避免刚好贴着屏幕边缘生成） */
     var lo=viewW*0.06, hi=viewW*0.94;
@@ -8736,6 +9187,208 @@ function updateBossHearts(dt){
   }
 }
 
+/* ============ ★新增元素逻辑层（弹跳方块 / 可动砖块 / 果冻区域）★ ============ */
+
+/* ★弹跳方块★：**不可穿透**的实心多边形 —— 玩家碰到任意一条边都会被按「该边法线的镜面反射」弹飞。
+   速度量纲（2026-10-15 用户要求「初速度应该可选 10-100」）：编辑器暴露 `speed` = 10~100，
+   引擎速度 = speed/10（px/帧，即 1.0~10.0）；老存档里 <10 的值按「原 px/帧」解释 ⇒ 老关卡零回归。 */
+function _bounceSpeedOf(el){
+  var v=(el&&el.speed!==undefined)?el.speed:0;
+  if(!(v>0))return 2.4;
+  return (v>=10)?(v/10):v;
+}
+function updateBounces(dt){
+  if(!Play.bounces||!Play.bounces.length)return;
+  var p=Play.player; if(!p||p.dead)return;
+  /* 本帧物理步进前的起点（stepPlayerPhysics 记录）—— 用来沿位移做扫掠，高速也不穿模。 */
+  var px0=(p._preX!==undefined)?p._preX:p.x;
+  var py0=(p._preY!==undefined)?p._preY:p.y;
+  for(var i=0;i<Play.bounces.length;i++){
+    var el=Play.bounces[i];
+    if(el._cool>0){el._cool-=dt;continue;}
+    var gm=_bounceGeom(el);
+    /* ★不可穿透★：把本帧位移切成 ≤2px 的小步，取**第一个**接触点。
+       旧版只在「帧末位置」测一次 ⇒ 高速穿过 8px 的方块会直接穿模。 */
+    var mdx=p.x-px0, mdy=p.y-py0;
+    var mdist=Math.sqrt(mdx*mdx+mdy*mdy);
+    if(mdist>48){px0=p.x; py0=p.y; mdx=0; mdy=0; mdist=0;}   /* 瞬移保护：正常物理单帧位移 ≪48px */
+    var nsub=Math.max(1,Math.ceil(mdist/2));
+    var hit=null, hx=p.x, hy=p.y;
+    for(var s=0;s<=nsub;s++){
+      var tt=s/nsub;
+      var sx=px0+mdx*tt, sy=py0+mdy*tt;
+      var h=_bounceHit({x:sx,y:sy,w:p.w,h:p.h},gm);
+      if(h){hit=h;hx=sx;hy=sy;break;}
+    }
+    if(!hit)continue;
+    var nx=hit.nx, ny=hit.ny;
+    var sp=_bounceSpeedOf(el);
+    var vx=p.vx, vy=p.vy;
+    var vn=vx*nx+vy*ny;
+    var rx=vx-2*vn*nx, ry=vy-2*vn*ny;      /* ★镜面反射★ */
+    var rl=Math.sqrt(rx*rx+ry*ry);
+    if(rl<0.15){rx=nx;ry=ny;rl=1;}         /* 近似静止 ⇒ 沿法线弹出 */
+    p.vx=rx/rl*sp; p.vy=ry/rl*sp;
+    p.grounded=false; p.canDoubleJump=true;
+    p.squashVY=0.5; p.squashVX=0.3;
+    /* ★推出到多边形外★：命中点回退 + 沿外法线推 pen ⇒ 玩家绝不会停在方块内部。 */
+    p.x=hx; p.y=hy;
+    if(hit.pen>0){p.x+=nx*hit.pen; p.y+=ny*hit.pen;}
+    el._cool=0.15;
+    _psfx('bounce', p.x+4, p.y+4);          /* ★弹跳音★（_cool 已限流，不会连响） */
+    /* 纯表现：沿法线扇形迸发霓虹粒子 */
+    var rgb=_hexToRgb3(_bounceColorOf(el));
+    for(var k=0;k<8;k++){
+      var ang=Math.atan2(ny,nx)+(k/8-0.5)*1.6;
+      Play.particles.push(mkParticle(p.x+4,p.y+4,Math.cos(ang)*2.2,Math.sin(ang)*2.2,320,rgb[0],rgb[1],rgb[2]));
+    }
+  }
+}
+/* ★可动砖块★：附着判定（在**移动之前**求值）。返回 0=未附着 / 1=顶面 / 2=底面 / 3=左面 / 4=右面。 */
+function _moverAttach(p,m){
+  var w=m.w||8,h=m.h||8;
+  var ovX=p.x+p.w>m.x-1&&p.x<m.x+w+1;
+  var ovY=p.y+p.h>m.y-1&&p.y<m.y+h+1;
+  if(ovX&&Math.abs((p.y+p.h)-m.y)<3.5)return 1;      /* 站在顶面 */
+  if(ovX&&Math.abs(p.y-(m.y+h))<3.5)return 2;        /* 顶在底面 */
+  if(ovY&&Math.abs((p.x+p.w)-m.x)<3.5)return 3;      /* 贴方块左面（玩家在左） */
+  if(ovY&&Math.abs(p.x-(m.x+w))<3.5)return 4;        /* 贴方块右面（玩家在右） */
+  return 0;
+}
+/* 骑手带动的逐轴预检用实体表（与 allSolids 同源，但**排除被骑的那一块**，
+   否则"移动后与砖重叠"会被误判成被挡住）。 */
+function _moverSolidList(skip){
+  var s=[];
+  Play.platforms.forEach(function(o){s.push(o);});
+  Play.disappearPlats.forEach(function(o){if(isDisappearVisible(o))s.push(o);});
+  Play.doors.forEach(function(o){if(!_doorPassable(o))s.push(o);});
+  Play.switchDoors.forEach(function(o){if(!_doorPassable(o))s.push(o);});
+  Play.breakables.forEach(function(o){s.push(o);});
+  Play.flammables.forEach(function(o){if(o.burning<=0)s.push(o);});
+  Play.iceBlocks.forEach(function(o){s.push(o);});
+  Play.foams.forEach(function(o){if(!o._pass)s.push(o);});
+  if(Play.movers)Play.movers.forEach(function(o){if(o!==skip)s.push(o);});
+  return s;
+}
+/* 推进一段：段内进度 `_prog` 0→1；`_sdir` ±1 决定沿段正向/反向行进。 */
+function _moverAdvance(m,dt){
+  if(!m._segs||!m._segs.length)return;
+  if(m._pauseT>0){m._pauseT-=dt; if(m._pauseT>0)return; m._pauseT=0;}
+  var seg=m._segs[m._si];
+  if(!seg){m._si=0;m._sdir=1;m._prog=0;return;}
+  var spd=(m._spds&&m._spds[m._si]>0)?m._spds[m._si]:0.6;
+  var L=Math.sqrt(seg.dx*seg.dx+seg.dy*seg.dy);
+  if(L<1e-6){m._prog=1;}
+  else{
+    var step=spd*dt*60;
+    var rem=(1-m._prog)*L;
+    var mv=(step>=rem)?rem:step;
+    var f=(m._sdir>0)?(mv/L):(-mv/L);   /* ★反向时沿段反向行进★ */
+    m.x+=seg.dx*f; m.y+=seg.dy*f;
+    m._prog+=mv/L;
+  }
+  if(m._prog>=1-1e-9){
+    var vx=seg.dx/L*spd*m._sdir, vy=seg.dy/L*spd*m._sdir;   /* 停止前的速度向量 */
+    m._prog=0;
+    /* ★每段都停顿 + 每段都单独产生动量★（用户 2026-10-15：「可动方块应该每段都有停止时间，
+       每一段都会单独产生动量」）—— 段末一律骤停、把**该段**的速度交给 kick，
+       停顿长度取该段的 `pauses[i]`（缺省回落 `pause`）。 */
+    var _pz=(m._pauses&&m._pauses[m._si]!==undefined)?m._pauses[m._si]:(m.pause!==undefined?m.pause:0.3);
+    m._atEnd=true; m._lastVX=vx; m._lastVY=vy; m._pauseT=_pz;
+    if(m._sdir>0){
+      if(m._si+1<m._segs.length){m._si++;}
+      else{m._sdir=-1;}
+    }else{
+      if(m._si-1>=0){m._si--;}
+      else{m._sdir=1;}
+    }
+  }
+}
+function updateMovers(dt){
+  if(!Play.movers||!Play.movers.length)return;
+  var p=Play.player;
+  for(var i=0;i<Play.movers.length;i++){
+    var m=Play.movers[i];
+    var att=(p&&!p.dead)?_moverAttach(p,m):0;
+    var ox=m.x, oy=m.y;
+    m._atEnd=false;
+    if(m._segs&&m._segs.length)_moverAdvance(m,dt);
+    if(m.spikeU||m.spikeD||m.spikeL||m.spikeR)m._srects=_moverSpikeRects(m);
+    else m._srects=null;
+    var dx=m.x-ox, dy=m.y-oy;
+    if(!p||p.dead)continue;
+    /* ★端点骤停 ⇒ 给附着玩家一个沿「刚才前进方向」的冲量★ */
+    if(m._atEnd&&att){
+      var kick=(m.kick!==undefined?m.kick:1.4);
+      p.vx+=m._lastVX*kick;
+      p.vy+=m._lastVY*kick;
+      p.grounded=false; p.canDoubleJump=true;
+      p.squashVY=0.4;
+      _psfx('moverStop', p.x+4, p.y+4);     /* ★金属骤停 + 带动玩家★ */
+    }
+    /* 带动：被挡住的轴不搬（与 p.onGhost 同策略，防止把玩家顶进实体） */
+    if(att&&(dx!==0||dy!==0)){
+      var sols=_moverSolidList(m);
+      if(!solidBlocksAt(p,p.x+dx,p.y,sols))p.x+=dx;
+      if(!solidBlocksAt(p,p.x,p.y+dy,sols))p.y+=dy;
+    }
+  }
+}
+/* ★果冻区域★：边界通行证 + 进出颤动 + 当前所在区域（供 _physMods / 窒息计时使用）。
+   必须在 `allSolids` 构建**之前**调用（本帧的壳是否参与碰撞取决于这里的 `_passT`）。 */
+function updateJellies(dt){
+  var list=Play.jellies;
+  if(!list||!list.length){Play._inJelly=null;Play.jellyTimer=Play.jellyMax;return;}
+  var p=Play.player;
+  if(!p||p.dead){Play._inJelly=null;return;}
+  var keys=Play.keys||{};
+  var left=!!(keys['KeyA']||keys['ArrowLeft']);
+  var right=!!(keys['KeyD']||keys['ArrowRight']);
+  var insideAny=null;
+  for(var i=0;i<list.length;i++){
+    var j=list[i];
+    if(j._passT>0){j._passT-=dt; if(j._passT<0)j._passT=0;}
+    var inside=rectsOverlap(p,j);
+    if(inside)insideAny=j;
+    j._inside=inside;                    /* 供 allSolids 的「从下方进入」判定使用 */
+    /* 方向只取水平主轴（引擎无「下」键；W/Up 是跳跃键，在顶上按它会照常起跳） */
+    var cxp=j.x+(j.w||32)/2, pcx=p.x+p.w/2;
+    var into=(cxp>=pcx)?1:-1;
+    var want=inside?-into:into;
+    var held=want>0?right:left;
+    if(held){
+      if(p._jellyHoldJ!==j){p._jellyHoldJ=j;p._jellyHold=0;}
+      p._jellyHold=(p._jellyHold||0)+dt;
+      if(p._jellyHold>=0.5){j._passT=0.6;p._jellyHold=0;}
+    }else if(p._jellyHoldJ===j){
+      p._jellyHold=0;
+    }
+    /* ★站在顶面 0.3s 不跳开 ⇒ 顶面打开，玩家掉进果冻里★（用户 2026-10-15 新规则：
+       「玩家站在上边界（不是碰到），0.3s 内立刻跳开的话就不会掉进去」）。 */
+    if(j._sinkT>0){j._sinkT-=dt; if(j._sinkT<0)j._sinkT=0;}
+    var _onTop=(p.vy>=-0.05)&&(Math.abs((p.y+p.h)-j.y)<3.0)&&
+               (p.x+p.w>j.x+0.5)&&(p.x<j.x+(j.w||32)-0.5);
+    if(_onTop&&p.grounded){j._standT=(j._standT||0)+dt;}
+    else{j._standT=0;}
+    if(j._standT>=0.3){j._sinkT=0.6;j._standT=0;}
+    /* 进出瞬间 / 贴边接触 ⇒ 整块 q 弹颤动（纯表现状态） */
+    var was=!!j._wasInside;
+    if(inside!==was){j._wobT=JELLY_WOB;j._wasInside=inside;_psfx(inside?'jellyEnter':'jellyExit',p.x+4,p.y+4);}
+    else if(!inside&&!j._wobT&&rectsOverlap({x:p.x-1,y:p.y-1,w:p.w+2,h:p.h+2},j)){j._wobT=JELLY_WOB;}
+  }
+  Play._inJelly=insideAny;
+  if(insideAny){
+    if(Play._jellySrc!==insideAny){
+      Play._jellySrc=insideAny;
+      Play.jellyMax=(insideAny.holdTime!==undefined&&insideAny.holdTime>0)?insideAny.holdTime:6;
+      if(Play.jellyTimer>Play.jellyMax||Play.jellyTimer<=0)Play.jellyTimer=Play.jellyMax;
+    }
+  }else{
+    Play._jellySrc=null;
+    Play.jellyTimer=Play.jellyMax;
+  }
+}
+
 function updatePlay(dt){
   updateParticlesOnly(dt);
   // 门开合动画进度（0→1）
@@ -8766,6 +9419,11 @@ function updatePlay(dt){
      枯萎/扑灭动作会卡在第一帧。 */
   updateFlowers(dt);
   updateFires(dt);
+  /* ★新增元素推进★：可动砖块（位置 + 骑手带动 + 端点骤停动量）与果冻区域
+     （边界通行证 / 进出颤动 / 当前所在区域）。两者都必须在 `allSolids`
+     构建**之前**完成，否则本帧的碰撞用的是上一帧的位置与通行证。 */
+  updateMovers(dt);
+  updateJellies(dt);
   /* ★怪物与 BOSS★：全部放在 `if(Play.deathAnim…)` **之前** ⇒ 死亡动画期间照常推进。
      理由（逐条，与上面野兽/巨花/火同构）：
        · graves   —— 玩家幽灵会触发墓碑（幽灵在死亡动画期间照常回放）；
@@ -8800,6 +9458,28 @@ function updatePlay(dt){
   Play.doors.forEach(function(d){if(!_doorPassable(d))allSolids.push(d);});
   Play.switchDoors.forEach(function(d){if(!_doorPassable(d))allSolids.push(d);});
   Play.movables.forEach(function(m){allSolids.push(m);});
+  /* ★可动砖块★：始终实心（可站可推）。位置由 updateMovers 推进，玩家由它带动。 */
+  Play.movers.forEach(function(m){allSolids.push(m);});
+  /* ★果冻区域★：**边界薄壳**实心（可站在顶面 / 侧面蹬墙跳），内部完全空。
+     `_passT>0`（刚完成 0.5s 持续按键）时整块暂时可穿。 */
+  Play.jellies.forEach(function(j){
+    if(j._passT>0)return;
+    var _sh=_jellyShells(j);   /* 顺序固定：0=上壳 1=下壳 2=左壳 3=右壳 */
+    var _goingUp=(p.vy<-0.02);
+    var _pc=p.y+p.h/2, _jc=j.y+(j.h||32)/2;
+    /* ★从下方进入★（含拐角）：向上运动且玩家中心已在果冻中心之上 ⇒ 下壳 + 左右壳一起放行。
+       用户 2026-10-15：「从下方的拐角处进入还是很困难」—— 旧版只放行下壳，拐角被左右壳挡住。 */
+    var _fromBelow=(_goingUp&&_pc>=_jc);
+    /* ★从内部向上跳★：脚底仍压在果冻顶之下（或与之交叠）⇒ 顶壳放行，玩家可一口气穿出；
+       身体完全离开（脚底 ≥ 果冻顶）后顶壳自动复位。 */
+    var _bodyBelowTop=((p.y+p.h)>j.y);
+    for(var _k=0;_k<_sh.length;_k++){
+      if(j._sinkT>0&&_k===0)continue;                       /* 站立下沉：顶面打开 */
+      if(_goingUp&&_bodyBelowTop&&_k===0)continue;          /* 从内部向上跳 ⇒ 顶面放行 */
+      if(_fromBelow&&_k!==0)continue;                       /* 从下方进入 ⇒ 下壳+左右壳放行 */
+      allSolids.push(_sh[_k]);
+    }
+  });
   Play.breakables.forEach(function(b){allSolids.push(b);});
   Play.flammables.forEach(function(f){if(f.burning<=0)allSolids.push(f);});
   Play.iceBlocks.forEach(function(ib){allSolids.push(ib);});
@@ -8838,6 +9518,9 @@ function updatePlay(dt){
   Play._inWater=_inWater;
   var _physMods=null;
   if(_inWater){_physMods={speedMul:0.30,inertiaMul:1.8,gravityMul:0.08,waterMode:true};}
+  /* ★果冻区域★：移动速度略降 + 阻滞感（惯性变大），**重力加速度不变**（用户明确要求），
+     并开启 `infiniteJump`（区域内无限连跳）—— 离开区域 mods 不再施加 ⇒ 立刻丧失。 */
+  else if(Play._inJelly){_physMods={speedMul:0.72,inertiaMul:1.7,infiniteJump:true,jellyMode:true};}
   else if(_onIce){_physMods={speedMul:1.5,inertiaMul:5};}
   stepPlayerPhysics(p,keys,dt,allSolids,Play.ghosts,_physMods);
   // ---- 水中气泡窒息计时 ----
@@ -8853,6 +9536,20 @@ function updatePlay(dt){
     }
   }else{
     Play.waterBubbleTimer=Play.waterBubbleMax;
+  }
+  /* ---- ★果冻区域：呼吸气泡缓缓收缩 → 收缩结束立即死亡★ ---- */
+  if(Play._inJelly){
+    Play.jellyTimer-=dt;
+    if(Play.jellyTimer<=0){
+      Play.jellyTimer=Play.jellyMax;
+      for(var _jp=0;_jp<20;_jp++){
+        var _ja=Math.random()*Math.PI*2;
+        Play.particles.push(mkParticle(p.x+4,p.y+4,Math.cos(_ja)*2,Math.sin(_ja)*2-0.6,800,120,240,180));
+      }
+      diePlay();return;
+    }
+  }else{
+    Play.jellyTimer=Play.jellyMax;
   }
   if(p.onGhost){
     var g=p.onGhost;
@@ -8898,6 +9595,8 @@ function updatePlay(dt){
       if(_cleared||_far)_fo._pass=0;
     }
   }
+  /* ★弹跳方块★：碰到即按接触面反射定律弹飞（速度大小 = 元素配置的 speed）。 */
+  updateBounces(dt);
   // 推可移动方块
   var pushDir=0;
   if(keys['KeyD']||keys['ArrowRight'])pushDir=1;
@@ -9314,12 +10013,44 @@ function updatePlay(dt){
     }
     if(fsp._t&&!fsp._f){fsp._tm-=dt;if(fsp._tm<=0)fsp._f=true;}
     if(fsp._f){
-      fsp.y+=(fsp.fallSpeed||8)*dt*60;
-      for(var pi=0;pi<Play.platforms.length;pi++){
-        if(rectsOverlap(fsp,Play.platforms[pi])){fsp.y=Play.platforms[pi].y-fsp.h;fsp._f=false;break;}
+      /* ★穿透 bug 修复★：旧实现 `fsp.y += fallSpeed*dt*60` 一步到位；
+         当 fallSpeed 很大（配置上限 40 ⇒ 单帧 40px）时一步就跨过 8px 厚的平台
+         ⇒ 重叠检测不到 ⇒ 倒刺直接穿过地板飞出画面"消失"。
+         修法：把这一帧位移**按 ≤4px 细分**，每个子步同时做
+           (a) 重叠检测（正常落到平台顶面）；
+           (b) **扫掠检测** —— 子步前后跨过平台顶面（prevBottom<=top<=newBottom）也算命中。
+         (b) 是真正消除穿透的那一半：即使某个子步位移仍大于平台厚度，
+           只要它的区间覆盖了平台顶面就一定能拦住。 */
+      var _mv2=(fsp.fallSpeed||8)*dt*60;
+      if(_mv2>0){
+        var _sub=Math.max(1,Math.ceil(_mv2/4));
+        var _inc=_mv2/_sub;
+        for(var _ss=0;_ss<_sub;_ss++){
+          var _pb=fsp.y+fsp.h;
+          fsp.y+=_inc;
+          var _nb=fsp.y+fsp.h;
+          var _stop=false;
+          for(var pi=0;pi<Play.platforms.length;pi++){
+            var _pf=Play.platforms[pi];
+            if(rectsOverlap(fsp,_pf)){fsp.y=_pf.y-fsp.h;fsp._f=false;_stop=true;break;}
+            var _top=_pf.y;
+            if(_pb<=_top+1e-6&&_nb>=_top&&fsp.x+fsp.w>_pf.x&&fsp.x<_pf.x+_pf.w){
+              fsp.y=_top-fsp.h;fsp._f=false;_stop=true;break;
+            }
+          }
+          if(_stop)break;
+        }
       }
     }
     if(rectsOverlap(p,fsp)){diePlay();return;}
+  }
+  /* ★可动砖块的荆棘刺★：与荆棘同口径 —— 碰到即死（不是被挡住）。 */
+  for(var _msi=0;_msi<Play.movers.length;_msi++){
+    var _msr=Play.movers[_msi]._srects;
+    if(!_msr||!_msr.length)continue;
+    for(var _msj=0;_msj<_msr.length;_msj++){
+      if(rectsOverlap(p,_msr[_msj])){diePlay();return;}
+    }
   }
   for(var l=0;l<Play.lasers.length;l++){
     var laser=Play.lasers[l];
@@ -9449,9 +10180,11 @@ function restartPlayFromLevel(){
    'movables','breakables','flammables','iceBlocks','goals','hearts','flagPickups',
    'gravityZones','labels','lamps','vines',
    'trophies','switches','switchDoors','waters','smokes','waterGrasses','foams','flagPoles','beasts','flowers','fires','portals',
-   'graves','skeletons','foes','bullets','bossDoors','_bossHearts'
+   'graves','skeletons','foes','bullets','bossDoors','_bossHearts',
+   'bounces','movers','jellies'
   ].forEach(function(k){Play[k]=[];});
   Play.boss=null;
+  Play.jellyTimer=6;Play.jellyMax=6;Play._inJelly=null;Play._jellySrc=null;
   /* ★BOSS BGM 闩锁随重开复位★（与 `startPlay` 同形）：否则重开后闩锁仍是 true，
      而 BOSS 已回到 dormant ⇒ 关卡一开始就放 BOSS 曲、且再也切不回关卡曲
      （`_bugscan.cjs` 实证：afterRestart latch=true bossState='dormant'）。 */
@@ -9508,6 +10241,17 @@ function restartPlayFromLevel(){
       case 'skeleton':c.state='patrol';c._t=0;c._dir=1;c._homeX=c.x;c._anim=0;Play.skeletons.push(c);break;
       case 'boss':Play.boss=makeBoss(c);break;
       case 'bossDoor':c.open=true;c._openProgress=1;Play.bossDoors.push(c);break;
+      /* ★弹跳方块★：碰边按反射定律弹飞（详见 _bounceHit / updateBounces 的契约注释）。 */
+      case 'bounce':c._cool=0;Play.bounces.push(c);break;
+      /* ★可动砖块★：解析多段轨迹（相对位移，下一段起点 = 上一段终点）。 */
+      case 'mover':
+        c._segs=_moverPath(c);c._spds=_moverSpeeds(c,c._segs.length);c._pauses=_moverPauses(c,c._segs.length);
+        c._si=0;c._sdir=1;c._prog=0;c._pauseT=0;c._atEnd=false;
+        c._lastVX=0;c._lastVY=0;c._srects=null;
+        Play.movers.push(c);break;
+      /* ★果冻区域★：凝胶方块。边界是实心薄壳（可站 / 可蹬墙跳），
+         持续按方向键 0.5s 才可穿进 / 穿出。 */
+      case 'jelly':c._passT=0;c._wobT=0;c._wasInside=false;Play.jellies.push(c);break;
     }
   });
   Play.player.dead=true;
@@ -9667,15 +10411,22 @@ function renderPlay(){
 
       /* === 拉伸 Bug 修复（试玩侧） ===
          不再把形状裁剪到所属画布范围。每个形状按自己的包围盒做视锥剔除。 */
+      /* ★性能修复（用户反馈「背景图层过多过复杂时的卡顿」）★：
+         旧代码对**每个形状**都线性扫一遍 `bg.chambers`（O(S×C)）并 `filter` 一遍
+         `bg.shapes`（O(S²) + 每帧 S 次数组分配）。层数/形状一多就是几万次判定 + 上千次
+         分配/帧 ⇒ 明显卡顿。这里改成**每帧先建一次索引**（O(S+C)），并把 `_nbrs`
+         直接传 `null`（它只在 `editorMode` 分支被用到，正式游戏里 editorMode=false，
+         这份计算完全是白做的）。 */
+      var _bcById={};
+      (bg.chambers||[]).forEach(function(c){_bcById[c.id]=c;});
       (bg.shapes||[]).forEach(function(sh){
-        var bc=null;
-        (bg.chambers||[]).forEach(function(c){if(c.id===sh.chamberId)bc=c;});
+        var bc=_bcById[sh.chamberId];
         if(!bc)return;
         var srx=sh.x+offX, sry=sh.y+offY;
         if(srx+sh.w<_pVisL||srx>_pVisR||sry+sh.h<_pVisT||sry>_pVisB)return;
         var a=(sh.alpha!==undefined?sh.alpha:0.85);
-        var _nbrs=(bg.shapes||[]).filter(function(o){return o!==sh&&o.type==='bgShape'&&o.chamberId===sh.chamberId;});
-        drawBgShape(g,sh,sh.x+offX,sh.y+offY,sh.w,sh.h,a,now,false,true,_nbrs,cam.zoom);
+        /* `_nbrs` 只在 editorMode 下用于"相邻边不描边"，游戏侧传 null 即可（省掉 O(S²)）。 */
+        drawBgShape(g,sh,sh.x+offX,sh.y+offY,sh.w,sh.h,a,now,false,true,null,cam.zoom);
       });
     });
   }
@@ -9824,6 +10575,12 @@ function renderPlay(){
     var adj=getAdjacency(f,Play.foams);
     drawFoamTo(g, f, adj);
   });
+  /* ★可动砖块★：金属方块 + 黄色危险标识线 + 可选荆棘刺。 */
+  Play.movers.forEach(function(m){drawMoverTo(g, m, true);});
+  /* ★弹跳方块★：彩色霓虹发光正多边形。 */
+  Play.bounces.forEach(function(b){drawBounceTo(g, b, true);});
+  /* ★果冻区域★：凝胶半透明彩色 + 边界液体摇晃 + q 弹颤动。 */
+  Play.jellies.forEach(function(j){drawJellyTo(g, j, true);});
   /* ★旗杆★：在标记物层（旗帜/奖杯附近）绘制。已激活的（`currentFlag===fp`）
      会画成"红色飘扬 + 脉动光环"，一眼认出这是当前重生点。 */
   if(Play.flagPoles)Play.flagPoles.forEach(function(fp){drawFlagPoleTo(g, fp, true);});
@@ -9896,23 +10653,149 @@ function renderPlay(){
     else if(l.type==='laserLeft')dx=-1;
     else if(l.type==='laserUp')dy=-1;
     else if(l.type==='laserDown')dy=1;
-    g.shadowBlur=12;g.shadowColor='#ff3366';
-    g.strokeStyle='#ff3366';g.lineWidth=3;
-    g.beginPath();g.moveTo(ray.startX,ray.startY);g.lineTo(ray.endX,ray.endY);g.stroke();
+    /* ★激光 v5：**更炫酷的高能红色光束 + 紫蓝色「跳动电弧」**★
+       用户 2026-10-15 反馈「激光效果不炫酷」→ v5 全面增强：
+         ① 光束整体高频抖动（0.4px，14Hz）⇒ 能量不稳定感；
+         ② 脉动呼吸更强（振幅 0.30→0.55）⇒ 更有"活"的感觉；
+         ③ 外场光晕更大更亮、束体颜色更纯（#ff1a33 / #ff7a8a）；
+         ④ 能量流更多更亮（len/55）；
+         ⑤ 电弧数量↑（len/16）亮度↑（alpha 0.22+0.78）跨度↑；
+         ⑥ 命中点新增红色爆发光晕 + 8 条散射火花 ⇒ 更强的命中反馈。
+       全部相位由 `_simTime()` / `_pr()` 决定 ⇒ 确定性、可复现、零 Math.random。
+       调色：红 #ff1a33 / 亮红 #ff7a8a / 暖白 #fff0f2 / 深红外场 #7a0f1c /
+             紫蓝电弧 #8a7cff / #b98cff / 冷白 #eef3ff。 */
+    var _now2=(typeof now==='number')?now:(Date.now()/1000);
+    var _st=_simTime();
+    var _sx=ray.startX, _sy=ray.startY, _ex=ray.endX, _ey=ray.endY;
+    var _bl2=0.45+0.55*Math.sin(_now2*9.5+l.x*0.05);    /* ★更强脉动★ */
+    var _len=Math.sqrt((_ex-_sx)*(_ex-_sx)+(_ey-_sy)*(_ey-_sy));
+    var _ux=0,_uy=0;
+    if(_len>1e-6){_ux=(_ex-_sx)/_len;_uy=(_ey-_sy)/_len;}
+    var _nx=-_uy, _ny=_ux;                     /* 光束的法向单位向量 */
+    /* ★光束高频抖动★：让整条激光看起来不稳定/高能（幅度 0.4px，14Hz） */
+    var _jit=Math.sin(_st*14.0+l.x*0.31)*0.4;
+    var _jnx=_nx*_jit, _jny=_ny*_jit;
+    /* ① 外场（深红软晕）—— 更大更亮 */
+    g.save();
+    g.globalAlpha=0.10+0.22*_bl2;
+    g.strokeStyle='#7a0f1c'; g.lineWidth=10; g.lineCap='round';
+    g.beginPath();g.moveTo(_sx+_jnx,_sy+_jny);g.lineTo(_ex+_jnx,_ey+_jny);g.stroke();
+    g.restore();
+    /* ② 束体：外深红内亮红两层 —— 颜色更纯更亮 */
+    g.save();
+    g.shadowBlur=18;g.shadowColor='#ff2f45';
+    g.strokeStyle='#ff1a33';g.lineWidth=4;
+    g.beginPath();g.moveTo(_sx+_jnx,_sy+_jny);g.lineTo(_ex+_jnx,_ey+_jny);g.stroke();
     g.shadowBlur=0;
-    g.strokeStyle='#ffffff';g.lineWidth=1;
-    g.beginPath();g.moveTo(ray.startX,ray.startY);g.lineTo(ray.endX,ray.endY);g.stroke();
-    g.shadowBlur=8;g.shadowColor='#ff3366';
-    g.fillStyle='#ff3366';
-    g.beginPath();g.arc(l.x+3,l.y+3,5,0,Math.PI*2);g.fill();
-    g.shadowBlur=0;
-    g.fillStyle='#ffaaaa';
-    g.beginPath();g.arc(l.x+3,l.y+3,2,0,Math.PI*2);g.fill();
-    if(ray.hit){
-      var gp=0.6+Math.sin(now*15)*0.4;
-      g.fillStyle='rgba(255,220,100,'+gp+')';
-      g.beginPath();g.arc(ray.endX,ray.endY,4+Math.random()*2,0,Math.PI*2);g.fill();
+    g.globalAlpha=0.92;
+    g.strokeStyle='#ff7a8a';g.lineWidth=2;
+    g.beginPath();g.moveTo(_sx+_jnx,_sy+_jny);g.lineTo(_ex+_jnx,_ey+_jny);g.stroke();
+    g.restore();
+    /* ③ 芯线：1px 暖白高光 */
+    g.save();
+    g.globalAlpha=0.90;
+    g.strokeStyle='#fff0f2';g.lineWidth=1;
+    g.beginPath();g.moveTo(_sx+_jnx,_sy+_jny);g.lineTo(_ex+_jnx,_ey+_jny);g.stroke();
+    g.restore();
+    /* ④ 能量流：沿束滑行的暖白亮斑（更多更亮） */
+    g.save();
+    g.lineCap='round';
+    var _nflow=Math.max(1,Math.min(4,Math.round(_len/55)));
+    for(var _fi=0;_fi<_nflow;_fi++){
+      var _ft=(_st*0.70+_fi/_nflow+_pr(l.x*0.13+_fi*3.3))%1;
+      var _fhalff=Math.min(0.10,_len>0?(10/_len):0.05);
+      var _fa=_ft-_fhalff, _fb=_ft+_fhalff;
+      if(_fa<0)_fa=0;
+      if(_fb>1)_fb=1;
+      if(_fb<=_fa)continue;
+      var _fade=Math.sin(Math.PI*Math.min(1,Math.max(0,_ft)));
+      g.globalAlpha=0.35+0.65*_fade;
+      g.strokeStyle='#ffe4e8';g.lineWidth=2;
+      g.beginPath();
+      g.moveTo(_sx+_ux*_len*_fa+_jnx,_sy+_uy*_len*_fa+_jny);
+      g.lineTo(_sx+_ux*_len*_fb+_jnx,_sy+_uy*_len*_fb+_jny);
+      g.stroke();
     }
+    g.restore();
+    /* ⑤ 紫蓝色「跳动电弧」：数量↑ 亮度↑ 跨度↑ */
+    g.save();
+    g.lineCap='round';
+    var _narc=Math.max(2,Math.min(12,Math.round(_len/16)));
+    for(var _ai=0;_ai<_narc;_ai++){
+      var _seed=l.x*0.071+l.y*0.113+_ai*3.7;
+      var _cyc=0.80+_pr(_seed)*0.50;                     /* 0.8~1.3s 更快周期 */
+      var _ph=((_st/_cyc)+_pr(_seed+1.7))%1;
+      var _life=0.45;                                    /* 45% 生命 */
+      if(_ph>_life)continue;
+      var _k2=_ph/_life;
+      var _env=Math.sin(Math.PI*_k2);
+      var _t3=(_ai+0.5)/_narc*0.84+0.08+(_k2-0.5)*0.06;
+      if(_t3<0.03)_t3=0.03;
+      if(_t3>0.97)_t3=0.97;
+      var _ax=_sx+(_ex-_sx)*_t3+_jnx, _ay=_sy+(_ey-_sy)*_t3+_jny;
+      var _side=(_ai%2===0)?1:-1;
+      var _amp=(5.5+4.0*_pr(_seed+4.1))*_env;            /* 跳得更高 */
+      var _spanA=9.0+6.0*_pr(_seed+5.3);                 /* 跨度更大 */
+      var _col=(_ai%3===0)?'#b98cff':'#8a7cff';
+      g.globalAlpha=0.22+0.78*_env;                      /* 更亮 */
+      g.strokeStyle=_col;g.lineWidth=1;
+      g.beginPath();
+      for(var _s2=0;_s2<=5;_s2++){
+        var _u2=_s2/5;
+        var _perp=_side*_amp*Math.sin(Math.PI*_u2)+(_pr(_seed+7.7+_s2*1.31)*2-1)*0.7;
+        var _along=(_u2-0.5)*_spanA;
+        var _pxx=_ax+_nx*_perp+_ux*_along;
+        var _pyy=_ay+_ny*_perp+_uy*_along;
+        if(_s2===0)g.moveTo(_pxx,_pyy);else g.lineTo(_pxx,_pyy);
+      }
+      g.stroke();
+      /* 冷白内芯 */
+      if(_env>0.55){
+        g.globalAlpha=(_env-0.55)*2.2;
+        g.strokeStyle='#eef3ff';g.lineWidth=1;
+        g.beginPath();
+        for(var _s3=0;_s3<=5;_s3++){
+          var _u3=_s3/5;
+          var _perp3=_side*_amp*0.90*Math.sin(Math.PI*_u3)+(_pr(_seed+7.7+_s3*1.31)*2-1)*0.6;
+          var _along3=(_u3-0.5)*_spanA*0.90;
+          var _pxx3=_ax+_nx*_perp3+_ux*_along3;
+          var _pyy3=_ay+_ny*_perp3+_uy*_along3;
+          if(_s3===0)g.moveTo(_pxx3,_pyy3);else g.lineTo(_pxx3,_pyy3);
+        }
+        g.stroke();
+      }
+    }
+    g.restore();
+    /* ★命中点能量爆发★：红色大光晕（shadowBlur脉动）+ 中心亮芯；
+       散射火花已移除，命中反馈只靠本光晕 + spawnLaserSpark 粒子特效 */
+    g.save();
+    g.shadowBlur=22*_bl2;g.shadowColor='#ff1a33';
+    g.globalAlpha=0.35+0.40*_bl2;
+    g.fillStyle='#ff1a33';
+    g.beginPath();g.arc(_ex,_ey,5.5+2.5*_bl2,0,Math.PI*2);g.fill();
+    g.shadowBlur=0;
+    g.globalAlpha=0.55+0.35*_bl2;
+    g.fillStyle='#ff7a8a';
+    g.beginPath();g.arc(_ex,_ey,2.8+1.2*_bl2,0,Math.PI*2);g.fill();
+    g.restore();
+    /* 既有粒子特效仍由 spawnLaserSpark 在 updateLasers 里生成 */
+    /* 发射器：金属壳 + 红色镜片 + 亮核 + 脉动环（紫蓝外环呼应电弧） */
+    g.save();
+    _px(g,l.x,l.y,6,6,'#171a2e');
+    _px(g,l.x,l.y,6,1,'#4a2030');
+    _px(g,l.x,l.y+5,6,1,'#0a0c18');
+    _px(g,l.x,l.y,1,6,'#3a1a26');
+    _px(g,l.x+5,l.y,1,6,'#0a0c18');
+    g.shadowBlur=10*_bl2;g.shadowColor='#ff2f45';
+    g.fillStyle='#ff3b52';
+    g.beginPath();g.arc(l.x+3,l.y+3,2.4,0,Math.PI*2);g.fill();
+    g.shadowBlur=0;
+    g.fillStyle='#fff0f2';
+    g.beginPath();g.arc(l.x+3,l.y+3,1.1,0,Math.PI*2);g.fill();
+    g.strokeStyle='rgba(160,120,255,'+(0.30+0.45*_bl2).toFixed(3)+')';
+    g.lineWidth=1;
+    g.beginPath();g.arc(l.x+3,l.y+3,4.2+1.4*_bl2,0,Math.PI*2);g.stroke();
+    g.restore();
   });
   Play.goals.forEach(function(goal){
     drawGoalPortalShader(g, goal, now);
@@ -10100,6 +10983,21 @@ function renderPlay(){
     g.globalAlpha=0.85;
     g.fillStyle='rgba(230,250,255,0.95)';
     g.beginPath();g.arc(bp.x+4-bR*0.45,bp.y+4-bR*0.5,Math.max(0.8,bR*0.16),0,Math.PI*2);g.fill();
+    g.restore();
+  }
+  /* ★果冻区域：玩家身上的呼吸气泡（缓缓收缩，缩完即死）★ */
+  if (Play._inJelly && Play.player && !Play.player.dead){
+    var _jb=Play.player;
+    var _jr=Math.max(0,Math.min(1,Play.jellyTimer/Math.max(0.001,Play.jellyMax)));
+    var _jR=7+13*_jr;
+    g.save();
+    g.globalAlpha=0.35+0.45*_jr;
+    g.strokeStyle='rgba(160,255,210,0.95)';
+    g.lineWidth=1.2/zoom;
+    g.beginPath();g.arc(_jb.x+4,_jb.y+4,Math.max(2,_jR),0,Math.PI*2);g.stroke();
+    g.globalAlpha=0.16+0.24*_jr;
+    g.fillStyle='rgba(120,240,190,0.9)';
+    g.beginPath();g.arc(_jb.x+4,_jb.y+4,Math.max(2,_jR),0,Math.PI*2);g.fill();
     g.restore();
   }
   g.restore();
@@ -10372,28 +11270,41 @@ function updateFlowers(dt){
     var fl=Play.flowers[i];
     if(fl.state==='gone')continue;
     if(fl.state==='bloom'){
-      /* 触发判定：任一**已释放**幽灵进入花的 triggerRadius 内。
-         ★★v2 关键修复：距离必须算到**花矩形上最近的一点**，不能算到花心★★
-         旧版用"幽灵中心 ↔ 花中心"的欧氏距离。对 `w=16,h=24` 的默认花
-         （半宽 8 / 半高 12）看起来没问题；但花一旦被拉高拉宽，花心就远离
-         幽灵能到达的地面线 ——
-           · 高花 h=100：花心在 y+50，幽灵走地面（中心 y=196）时**垂直距离**
-             就已经 46px > 40px 半径 ⇒ 幽灵站在花正下方正中间钻进花里也不枯萎；
-           · 宽花 w=120：花心在 x+60，幽灵贴着花右缘时**水平距离** 60px > 40px
-             ⇒ 同样不枯萎。
-         这正是用户报告的症状①「幽灵已经到它身边了也不枯萎」。
-         改用"到矩形的最近点距离"后，判定口径变成用户直觉：
-         **幽灵离花本体任何一点在 triggerRadius 内 ⇒ 触发**，
-         与花的大小无关（默认花的观感完全不变：贴到 40px 就触发）。 */
+      /* 触发判定（v4 ★进入式/跨边界★）：只有**已释放**幽灵从激活区**外跨入内**才枯萎。
+         —— 为什么要"进入式" ——
+         v2 只测 幽灵中心↔花心 距离；v3 改成"幽灵矩形 ∩ 花膨胀矩形"（更准）；
+         但二者都是"只要**处于**区内就触发"。而幽灵在 diePlay 创建于**死亡点**，
+         死亡动画结束后才 released（见 updateDeathAnim），释放瞬间它往往已落在 40px
+         触发区内（玩家常死在花附近）→ "幽灵一出现花就枯萎、根本没走进去"，
+         正是用户反复反馈的 bug。
+         v4 改为**跨边界检测**：每个幽灵对每朵花维护"上一帧是否在区内"(g._flowerInside)
+         与"是否已被观测过"(g._flowerSeen)；仅当
+            本帧在区内 ∧ 上一帧不在区内 ∧ 之前已被观测过（≠生成首帧）
+         才触发。生成/释放瞬间即使落在区内，也只记录状态、不触发；之后离开再进入才算"进入"。
+         膨胀矩形 = [fl.x-tr, fl.x+fl.w+tr] × [fl.y-tr, fl.y+fl.h+tr]。 */
       var tr=fl.triggerRadius||40;
-      var hit=false;
-      for(var gi=0;gi<Play.ghosts.length&&!hit;gi++){
+      var fL=fl.x-tr, fR=fl.x+(fl.w||16)+tr;
+      var fT=fl.y-tr, fB=fl.y+(fl.h||24)+tr;
+      var triggered=false;
+      for(var gi=0;gi<Play.ghosts.length;gi++){
         var g=Play.ghosts[gi];
         if(!g.released)continue;
-        var gdx=_distToRect((g.x+4),(g.y+4),fl);
-        if(gdx<tr)hit=true;
+        if(!g._flowerSeen)g._flowerSeen=[];
+        if(!g._flowerInside)g._flowerInside=[];
+        var gL=g.x, gR=g.x+8, gT=g.y, gB=g.y+8;   /* 幽灵 8×8 矩形 */
+        var inside=(gR>fL && gL<fR && gB>fT && gT<fB);
+        var inIdx=g._flowerInside.indexOf(fl);
+        var seenIdx=g._flowerSeen.indexOf(fl);
+        var wasInside=inIdx>=0;
+        var wasSeen=seenIdx>=0;
+        /* 从外跨入内（且非生成首帧）→ 触发 */
+        if(inside && !wasInside && wasSeen)triggered=true;
+        /* 维护状态：seen 每帧都记；inside 按本帧实情增删（索引非法时不会误 splice） */
+        if(!wasSeen)g._flowerSeen.push(fl);
+        if(inside){ if(!wasInside)g._flowerInside.push(fl); }
+        else { if(wasInside)g._flowerInside.splice(inIdx,1); }
       }
-      if(hit){fl.state='withering';fl._t=0;}
+      if(triggered){fl.state='withering';fl._t=0;}
       continue;
     }
     /* withering：播完 witherTime → gone（从数组移除） */
